@@ -37,7 +37,7 @@ source .venv/bin/activate
 pip install -r requirements-mcp.txt
 ```
 
-The bundled server uses the Python standard library only. No `mcp` SDK install is required.
+Runtime dependency is `httpx` (`pip install -r requirements-mcp.txt`). No official `mcp` SDK and no GIS stack. After pulling this repo, reinstall into the persistent `.venv` once.
 
 ## Run
 

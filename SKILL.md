@@ -60,6 +60,8 @@ analyze_regions
 
 传入整个 GeoJSON `FeatureCollection`（或单个 `Feature`）。不要逐地物调用。
 
+`search_projects=true`（默认）时已用项目关键词检索 POI，`search_poi` **不会**再打第二套泛搜。`search_poi=false` 关不掉项目检索。仅当 `search_projects=false` 时才做无项目关键词的周边检索。两旗都 `false` 时不访问高德/百度/OSM。
+
 该工具会一次性完成：
 
 1. 质心、bbox、面积、周长、紧凑度、bbox 长宽比等确定性几何计算；
@@ -116,6 +118,8 @@ Key 配置参照 [map_api_setup.md](references/map_api_setup.md)。
 
 如果某个数据源不可用、超时或返回空结果，不要让 Agent 因此反复重试。MCP 已负责一次查询过程中的
 并发、超时和单轮扩展补查；Skill 只需要判断最终证据是否足够。
+
+看每个 source 的 `status`：`ok` / `empty` / `error` / `unavailable`。没配 Key 是 `unavailable`（`reason_code=NO_API_KEY`），不要当失败重试。`error` 且 `reason_code=INVALID_API_KEY` 时本任务永久跳过该源；`RATE_LIMIT` / `TIMEOUT` 可换源，不要空转重试同一 Key。`empty` 表示接口成功但附近没有结果。
 
 如果返回的多个来源明显矛盾，不要只选“看起来更像”的一个；将冲突作为 evidence 的一部分保留。
 

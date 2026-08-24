@@ -111,9 +111,10 @@ geo-region-inference/
 ├── SKILL.md                         # Agent 的语义工作流
 ├── README.md                        # 项目说明
 ├── MCP_SETUP.md                     # MCP 安装与配置
-├── mcp_server.py                    # MCP Server
+├── mcp_server.py                    # MCP Server（编排 + JSON-RPC）
+├── geo_clients.py                   # 坐标 / httpx / 高德百度 OSM
 ├── mcp_config.example.json         # MCP Host 配置示例
-├── requirements-mcp.txt            # MCP 环境依赖说明
+├── requirements-mcp.txt            # 运行依赖（httpx）
 ├── validation.py                    # 输出 Schema 校验（MCP 与 CLI 共用）
 ├── tests/                           # 离线单元测试（无需 API Key）
 │
@@ -229,7 +230,7 @@ validate_result
 
 **主工具 / 正常任务首选。**
 
-输入整个 GeoJSON/FeatureCollection，完成批量分析和在线证据收集。
+输入整个 GeoJSON/FeatureCollection，完成批量分析和在线证据收集。默认 `search_projects=true` 只打项目关键词，不因 `search_poi=true` 加倍请求。OSM 按最多 10 个质心合并一次 Overpass。
 
 适合：
 
@@ -336,7 +337,7 @@ MCP Server 是长驻进程。MCP Host 建立连接后，Python 运行时和 MCP 
 
 ## 7. 依赖与安装
 
-MCP Server 当前实现主要使用 Python 标准库，避免引入完整 GIS 栈。
+MCP Server 使用 Python 标准库加 **httpx**（钉在 `requirements-mcp.txt`），避免引入完整 GIS 栈。不需要官方 `mcp` SDK。
 
 推荐创建一个**持久虚拟环境**：
 
@@ -362,7 +363,7 @@ source .venv/bin/activate
 pip install -r requirements-mcp.txt
 ```
 
-当前 `requirements-mcp.txt` 无第三方包。离线测试：
+装好依赖后做离线测试：
 
 ```bash
 python -m unittest discover -s tests -v
