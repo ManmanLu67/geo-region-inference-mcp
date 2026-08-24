@@ -71,6 +71,8 @@ analyze_regions
 5. 初次查询没有直接项目证据时，只额外执行一次约 `2–2.5×` 的扩展半径项目补查；
 6. 对 API 原始结果进行预过滤和压缩，只把与语义判断有关的字段返回给 LLM。
 
+MCP 返回字段定义见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)（`sources[].status`、`reason_code` 等）。
+
 因此，不要再执行下面这种旧式链路：
 
 ```bash
@@ -241,6 +243,8 @@ MCP Server 是常驻进程。MCP Host 通常启动一次 Server 子进程，然�
 - 本地调试；
 - MCP 不可用时的人工 fallback；
 - 单独验证某个 API 或几何算法。
+
+`query_*.py` 与 `coord_transform.py` 已委托 **`geo_clients`**，与 MCP 共用同一 httpx HTTP 层；`geo_stats.py` 仍为独立几何 CLI。
 
 **正常 Skill 执行不要主动调用它们。**
 

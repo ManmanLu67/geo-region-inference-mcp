@@ -53,3 +53,7 @@ MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 f
   python scripts/coord_transform.py wgs84_to_gcj02 <lon> <lat>
   python scripts/coord_transform.py wgs84_to_bd09 <lon> <lat>
   ```
+
+## MCP 证据 Schema
+
+`analyze_regions` 返回的 `features[]`、`sources[]`、`status`、`reason_code` 等字段见 [mcp_evidence_schema.md](mcp_evidence_schema.md)。LLM 最终输出格式见 [output_schema.md](output_schema.md)。
