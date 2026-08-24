@@ -1,5 +1,7 @@
 # 输出 JSON Schema
 
+> 本文档描述 LLM **最终**语义输出。MCP `analyze_regions` 返回的中间证据见 [mcp_evidence_schema.md](mcp_evidence_schema.md)。
+
 每个输入地物（feature）对应一个结果对象，多个地物就是一个结果对象数组。
 最终语义结果由 Skill 生成，MCP 的 `validate_result` 负责运行时校验。
 

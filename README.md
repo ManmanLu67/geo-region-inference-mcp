@@ -119,7 +119,8 @@ geo-region-inference/
 ├── tests/                           # 离线单元测试（无需 API Key）
 │
 ├── references/
-│   ├── output_schema.md             # 最终输出 Schema
+│   ├── output_schema.md             # LLM 最终输出 Schema
+│   ├── mcp_evidence_schema.md       # MCP analyze_regions 中间证据
 │   ├── project_inference_signals.md # 项目线索与证据优先级
 │   ├── landuse_taxonomy.md          # 区域类型词汇与分类参考
 │   ├── overpass_query_guide.md      # OSM / Overpass 查询规则
@@ -232,6 +233,19 @@ validate_result
 
 输入整个 GeoJSON/FeatureCollection，完成批量分析和在线证据收集。默认 `search_projects=true` 只打项目关键词，不因 `search_poi=true` 加倍请求。OSM 按最多 10 个质心合并一次 Overpass。
 
+**参数**（详见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)）：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `search_projects` | true | 项目关键词 POI 检索 |
+| `search_poi` | true | 仅当 `search_projects=false` 时有泛搜意义 |
+| `expand_radius_if_needed` | true | 无直接项目证据时扩圈一次 |
+| `max_workers` | 8 | 并发上限 8 |
+
+**限制**：单次最多 **80** 个 feature；多环 Polygon 质心为面积加权（shoelace）。
+
+**返回**：`features[]` 含几何统计 + `sources[]`（`status` / `reason_code` / `expanded_radius_m` 等），供 LLM 推理；不是最终语义 JSON。
+
 适合：
 
 - 多地物分析
@@ -251,6 +265,8 @@ validate_result
 - bbox
 - bbox 长宽比
 - compactness
+
+单次最多 **80** 个 feature。多环 Polygon 使用面积加权质心。
 
 适合调试或补充计算，不是正常任务的首选入口。
 
@@ -506,6 +522,8 @@ Skill 内部解析
 - API 接口排错；
 - 算法测试；
 - MCP 不可用时人工 fallback；
+
+`query_*.py` 与 `coord_transform.py` 现为 **`geo_clients` 薄封装**，HTTP 与三源查询逻辑不在脚本内，与 MCP 共用同一实现。
 
 **正常 Agent 执行不应把它们当作主工具链。**
 
