@@ -1,0 +1,3 @@
+# No third-party runtime dependency is required by the bundled MCP server.
+# It uses Python's standard library and implements the MCP stdio JSON-RPC surface directly.
+# This avoids installing a large GIS stack and also avoids reinstalling packages per task.
