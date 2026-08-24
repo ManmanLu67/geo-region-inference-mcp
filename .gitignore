@@ -1,0 +1,17 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.env
+.env.*
+!.env.example
+mcp_config.json
+*.local.json
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+.headroom-cache/
