@@ -28,6 +28,7 @@ radius_m = min(max(150, 0.6 * max(bbox_width_m, bbox_height_m)), 2500)
 - Overpass 按质心 **每 10 个合并为一次 HTTP**（`ceil(N/10)` 次；有扩圈则约 ×2）
 - Agent **不要**在 MCP 批处理外再 `sleep(1)` 或逐地物重复调用 OSM
 - 可通过 `OVERPASS_URL` 指向备用/自建 Overpass 实例
+- 若 Overpass 主机被沙箱 egress 拦截、纯等待超时，可设 `OSM_ENABLED=false` 直接跳过所有 OSM 请求（OSM 返回 `unavailable` + `reason_code=DISABLED`，不影响 Amap/Baidu）
 
 ## 结果怎么解读
 
@@ -45,12 +46,12 @@ MCP 返回的 OSM source（或 CLI 脚本 stdout）中，以下字段重要性�
 
 - 不要把「OSM 无数据」当作「这里没有建筑/是空地」的证据
 - 看 `evidence.data_source`：若所有在线源均不可用/为空，则为 `offline`
-- 转为依赖 MCP 返回的 `geometry` 形状特征（或离线时 `scripts/geo_stats.py`）和 `properties` 做弱证据推理
+- 转为依赖 MCP 返回的 `geometry` 形状特征（或离线时用 `calculate_geometry` / 几何字段）和 `properties` 做弱证据推理
 - `region_type`/`possible_buildings`/`related_projects` 里对应给出较低置信度（建议不超过 0.4），并在 evidence 里写明「OSM 无覆盖数据，基于几何形状推测」
 
 ## 失败与降级
 
 | 路径 | 行为 |
 |------|------|
-| **MCP** | `sources[osm].status=error`，看 `reason_code`（`TIMEOUT` / `UPSTREAM_ERROR` / `INVALID_RESPONSE`）。`unavailable` 不适用于 OSM（无 Key 要求）。不要空转重试同一批请求。 |
+| **MCP** | `sources[osm].status=error`，看 `reason_code`（`TIMEOUT` / `UPSTREAM_ERROR` / `INVALID_RESPONSE` / `DISABLED`）。`unavailable` 仅出现在被 `OSM_ENABLED=false` 关闭时（无 Key 要求）。不要空转重试同一批请求。 |
 | **CLI 脚本** | 网络失败时退出码 2；不要重试超过 1 次，直接转离线模式。 |

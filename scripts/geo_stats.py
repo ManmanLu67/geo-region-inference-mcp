@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# DEPRECATED — 见 scripts/README.md
+# 警告：本脚本质心为顶点平均，MCP 为面积加权；lon/lat 可能与 MCP 系统性不同。
 """
 geo_stats.py — Compute deterministic geometric features from a GeoJSON-like
 input (FeatureCollection, single Feature, or bare geometry), so the AI never

@@ -108,34 +108,36 @@ validate_result
 ```text
 geo-region-inference/
 │
-├── SKILL.md                         # Agent 的语义工作流
-├── README.md                        # 项目说明
+├── SKILL.md                         # Agent 语义工作流（读这个执行推断）
+├── README.md                        # 项目概览与文档地图
 ├── MCP_SETUP.md                     # MCP 安装与配置
 ├── mcp_server.py                    # MCP Server（编排 + JSON-RPC）
+├── geo_input.py                     # GeoJSON 加载、CRS 重投影、Esri 误传检测
+├── geo_geometry.py                  # MCP 权威几何统计
 ├── geo_clients.py                   # 坐标 / httpx / 高德百度 OSM
-├── mcp_config.example.json         # MCP Host 配置示例
-├── requirements-mcp.txt            # 运行依赖（httpx）
 ├── validation.py                    # 输出 Schema 校验（MCP 与 CLI 共用）
-├── tests/                           # 离线单元测试（无需 API Key）
+├── mcp_config.example.json
+├── requirements-mcp.txt             # httpx + pyproj（CRS，非 GDAL）
+├── tests/
+│   ├── test_offline.py
+│   └── fixtures/                    # 合成测试数据（无真实地块）
 │
-├── references/
-│   ├── output_schema.md             # LLM 最终输出 Schema
-│   ├── mcp_evidence_schema.md       # MCP analyze_regions 中间证据
-│   ├── project_inference_signals.md # 项目线索与证据优先级
-│   ├── landuse_taxonomy.md          # 区域类型词汇与分类参考
-│   ├── overpass_query_guide.md      # OSM / Overpass 查询规则
-│   └── map_api_setup.md             # 高德 / 百度配置说明
+├── references/                      # 参数/env/schema 单一事实源 → 见 README「文档地图」
 │
-└── scripts/                         # 本地调试 / 旧版 fallback
-    ├── geo_stats.py
-    ├── coord_transform.py
-    ├── query_amap.py
-    ├── query_baidu.py
-    ├── query_overpass.py
-    └── validate_output.py
+└── scripts/                         # deprecated — 见 scripts/README.md
 ```
 
-`scripts/` 仍然保留，但已经不是正常 Skill 执行路径。
+**文档地图**
+
+| 读什么 | 文件 |
+|--------|------|
+| 怎么推断 | `SKILL.md` |
+| 怎么装 MCP | `MCP_SETUP.md` |
+| 工具参数 / env / MCP 返回字段 | `references/mcp_evidence_schema.md` |
+| LLM 最终 JSON | `references/output_schema.md` |
+| API Key | `references/map_api_setup.md` |
+
+`scripts/` **已废弃**，正常路径只用 MCP；见 [scripts/README.md](scripts/README.md)。
 
 ---
 
@@ -162,9 +164,15 @@ validate_result
 
 推荐输入：
 
-- GeoJSON `FeatureCollection`
-- GeoJSON `Feature`
-- 可解析的 JSON 几何对象
+- GeoJSON `FeatureCollection` / `Feature`（内联或 **`input_path` 指向本地文件**）
+- ArcGIS 导出 GeoJSON（推荐 WGS84；投影坐标系如 EPSG:4509 须带 CRS，MCP 自动重投影）
+- **不要**传入 Esri REST JSON（`rings`+`attributes`）；须先在 ArcGIS 导出 GeoJSON
+
+大文件示例：
+
+```text
+analyze_regions(input_path="D:/项目/地块.geojson")
+```
 
 如果原始数据是 SHP，建议在输入层先转换为 GeoJSON/JSON。
 
@@ -176,7 +184,9 @@ validate_result
 analyze_regions
 ```
 
-一次输入整个 FeatureCollection。
+一次输入整个 FeatureCollection，或使用 `input_path`。
+
+**汇报前必读** `input_alerts` 与 `online_summary`（在线全挂 ≠ 无项目；`CRS_ASSUMED` 须提醒用户确认位置）。
 
 该 Tool 会完成：
 
@@ -231,16 +241,9 @@ validate_result
 
 **主工具 / 正常任务首选。**
 
-输入整个 GeoJSON/FeatureCollection，完成批量分析和在线证据收集。默认 `search_projects=true` 只打项目关键词，不因 `search_poi=true` 加倍请求。OSM 按最多 10 个质心合并一次 Overpass。
+输入整个 GeoJSON/FeatureCollection 或 `input_path`，完成批量分析和在线证据收集。返回含 `input_meta`、`input_alerts`、`online_summary`（在线查询时）。默认 `search_projects=true` 只打项目关键词，不因 `search_poi=true` 加倍请求。OSM 按最多 10 个质心合并一次 Overpass。
 
-**参数**（详见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)）：
-
-| 参数 | 默认 | 说明 |
-|------|------|------|
-| `search_projects` | true | 项目关键词 POI 检索 |
-| `search_poi` | true | 仅当 `search_projects=false` 时有泛搜意义 |
-| `expand_radius_if_needed` | true | 无直接项目证据时扩圈一次 |
-| `max_workers` | 8 | 并发上限 8 |
+**参数与环境变量**详见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)（单一事实源）。
 
 **限制**：单次最多 **80** 个 feature；多环 Polygon 质心为面积加权（shoelace）。
 
@@ -353,7 +356,7 @@ MCP Server 是长驻进程。MCP Host 建立连接后，Python 运行时和 MCP 
 
 ## 7. 依赖与安装
 
-MCP Server 使用 Python 标准库加 **httpx**（钉在 `requirements-mcp.txt`），避免引入完整 GIS 栈。不需要官方 `mcp` SDK。
+MCP Server 使用 Python 标准库加 **httpx** + **pyproj**（CRS 重投影，见 `requirements-mcp.txt`），无 GDAL/GeoPandas。不需要官方 `mcp` SDK。
 
 推荐创建一个**持久虚拟环境**：
 
@@ -395,7 +398,7 @@ python -m unittest discover -s tests -v
 |---|---|---|
 | 高德 | POI / 项目名称 / 地址等 | `AMAP_KEY` |
 | 百度 | POI / 项目名称 / 地址等 | `BAIDU_AK` |
-| OSM / Overpass | 开放地图与建设标签 | 通常无需 Key |
+| OSM / Overpass | 开放地图与建设标签 | 通常无需 Key（可用 `OSM_ENABLED=false` 关闭） |
 
 推荐通过 MCP Host 的 `env` 注入，不要写入 `SKILL.md`。
 
@@ -413,6 +416,7 @@ python -m unittest discover -s tests -v
         "AMAP_KEY": "YOUR_AMAP_KEY",
         "BAIDU_AK": "YOUR_BAIDU_AK",
         "OVERPASS_URL": "https://overpass-api.de/api/interpreter",
+        "OSM_ENABLED": "true",
         "HTTP_TIMEOUT_SECONDS": "12"
       }
     }
@@ -514,18 +518,11 @@ Skill 内部解析
 
 ---
 
-## 11.  旧脚本保留
+## 11. scripts/（已废弃）
 
-`scripts/` 保留的原因：
+本目录 **不是** 正常 Skill 执行路径。详见 [scripts/README.md](scripts/README.md)。
 
-- 单独调试；
-- API 接口排错；
-- 算法测试；
-- MCP 不可用时人工 fallback；
-
-`query_*.py` 与 `coord_transform.py` 现为 **`geo_clients` 薄封装**，HTTP 与三源查询逻辑不在脚本内，与 MCP 共用同一实现。
-
-**正常 Agent 执行不应把它们当作主工具链。**
+`geo_stats.py` 质心算法与 MCP 不同（顶点平均 vs 面积加权），应急使用时勿与 MCP 结果对比。
 
 ---
 

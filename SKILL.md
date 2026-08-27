@@ -43,6 +43,20 @@ validate_result(最终结果)
 检查用户提供的 JSON 结构和属性字段。不要假设固定字段名——属性表可能几乎为空，也可能有
 专业代码字段。先识别地物数量和属性字段名；若输入明显只有一个地物且字段一目了然，可以直接处理。
 
+**ArcGIS 用户（推荐流程）**
+
+1. 在 ArcGIS 中将图层 **导出为 GeoJSON**（`.geojson` 或 `.json`）。
+2. 坐标系优先选 **WGS 1984 (EPSG:4326)**；若数据为 CGCS2000 高斯投影（如 EPSG:4509），导出时保留坐标系信息即可，MCP 会自动重投影到 WGS84。
+3. **不要**直接把 Esri REST JSON（含 `rings`/`attributes` 的 ArcGIS 接口格式）传给 MCP；若误传，MCP 会提示重新导出为 GeoJSON。
+
+**大文件 / 顶点多**
+
+使用文件路径，不要把整份 JSON 贴进对话：
+
+```text
+analyze_regions(input_path="D:/项目/地块.geojson")
+```
+
 如果用户提供的是 SHP：
 
 - 优先让宿主/文件工具先把 SHP 转换为 GeoJSON/JSON，或提供已转换结果；
@@ -58,7 +72,12 @@ validate_result(最终结果)
 analyze_regions
 ```
 
-传入整个 GeoJSON `FeatureCollection`（或单个 `Feature`）。不要逐地物调用。
+传入整个 GeoJSON `FeatureCollection`（或单个 `Feature`），或使用 `input_path` 指向本地文件。不要逐地物调用。
+
+**向用户汇报前必须先读**：
+
+- `input_alerts` — 若含 `CRS_ASSUMED`，提醒用户确认位置是否合理（文件未声明坐标系，已假定 WGS84）。
+- `online_summary` — 若 `all_channels_unavailable` 为 true，说明在线源不可用（缺 Key / Overpass 不通），**不是**「此地无项目」。
 
 `search_projects=true`（默认）时已用项目关键词检索 POI，`search_poi` **不会**再打第二套泛搜。`search_poi=false` 关不掉项目检索。仅当 `search_projects=false` 时才做无项目关键词的周边检索。两旗都 `false` 时不访问高德/百度/OSM。
 
@@ -73,16 +92,7 @@ analyze_regions
 
 MCP 返回字段定义见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)（`sources[].status`、`reason_code` 等）。
 
-因此，不要再执行下面这种旧式链路：
-
-```bash
-python scripts/geo_stats.py ...
-python scripts/query_amap.py ...
-python scripts/query_baidu.py ...
-python scripts/query_overpass.py ...
-```
-
-也不要让 LLM 自己决定“先高德、再百度、再 OSM、再放大半径”的每一步；这些确定性调度已经移动到 MCP Server。
+因此，不要执行旧式 `python scripts/*.py` 链路（**已废弃**，见 [scripts/README.md](scripts/README.md)）。确定性调度已在 MCP Server 内完成。
 
 ### MCP 数据源行为
 
@@ -112,7 +122,7 @@ OSM  ─┘
 
 - 高德：配置 `AMAP_KEY` 才可用；
 - 百度：配置 `BAIDU_AK` 才可用；
-- OSM/Overpass：无需 API key，但受公共服务限流影响；可通过 `OVERPASS_URL` 指向备用/自建实例。
+- OSM/Overpass：无需 API key，但受公共服务限流影响；可通过 `OVERPASS_URL` 指向备用/自建实例；若 Overpass 主机被沙箱 egress 拦截、纯等待超时，可设 `OSM_ENABLED=false` 直接跳过所有 OSM 请求（OSM 返回 `unavailable` + `reason_code=DISABLED`）。
 
 Key 配置参照 [map_api_setup.md](references/map_api_setup.md)。
 
@@ -121,7 +131,7 @@ Key 配置参照 [map_api_setup.md](references/map_api_setup.md)。
 如果某个数据源不可用、超时或返回空结果，不要让 Agent 因此反复重试。MCP 已负责一次查询过程中的
 并发、超时和单轮扩展补查；Skill 只需要判断最终证据是否足够。
 
-看每个 source 的 `status`：`ok` / `empty` / `error` / `unavailable`。没配 Key 是 `unavailable`（`reason_code=NO_API_KEY`），不要当失败重试。`error` 且 `reason_code=INVALID_API_KEY` 时本任务永久跳过该源；`RATE_LIMIT` / `TIMEOUT` 可换源，不要空转重试同一 Key。`empty` 表示接口成功但附近没有结果。
+看每个 source 的 `status`：`ok` / `empty` / `error` / `unavailable`。没配 Key 是 `unavailable`（`reason_code=NO_API_KEY`），不要当失败重试；OSM 被 `OSM_ENABLED=false` 关闭时也是 `unavailable`（`reason_code=DISABLED`），同样不要重试。`error` 且 `reason_code=INVALID_API_KEY` 时本任务永久跳过该源；`RATE_LIMIT` / `TIMEOUT` 可换源，不要空转重试同一 Key。`empty` 表示接口成功但附近没有结果。
 
 如果返回的多个来源明显矛盾，不要只选“看起来更像”的一个；将冲突作为 evidence 的一部分保留。
 
@@ -198,15 +208,7 @@ region_type / possible_buildings（推理依据）
 validate_result
 ```
 
-不要再执行：
-
-```bash
-python scripts/validate_output.py ...
-```
-
-若校验失败，根据返回的 `errors` 修改结果后再次验证。
-
-旧版 `scripts/validate_output.py` 仍保留，用于人工/离线兼容，但不是默认执行路径。
+不要再执行 `python scripts/validate_output.py`（**已废弃**）。若校验失败，根据 `validate_result` 返回的 `errors` 修改后重试。
 
 ## 第五步：呈现给用户
 
@@ -236,16 +238,8 @@ MCP Server 是常驻进程。MCP Host 通常启动一次 Server 子进程，然�
 
 建议把 MCP 环境安装到一个持久虚拟环境，配置中直接指向该环境的 Python。
 
-## 旧脚本的定位
+## scripts/（已废弃）
 
-`scripts/` 目录下的脚本现在只承担：
-
-- 本地调试；
-- MCP 不可用时的人工 fallback；
-- 单独验证某个 API 或几何算法。
-
-`query_*.py` 与 `coord_transform.py` 已委托 **`geo_clients`**，与 MCP 共用同一 httpx HTTP 层；`geo_stats.py` 仍为独立几何 CLI。
-
-**正常 Skill 执行不要主动调用它们。**
+见 [scripts/README.md](scripts/README.md)。**勿**在 Skill 正常流程中调用；`geo_stats.py` 质心与 MCP 不同。
 
 MCP 配置与启动说明见 [MCP_SETUP.md](MCP_SETUP.md)。

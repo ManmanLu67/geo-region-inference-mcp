@@ -9,13 +9,34 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 ```jsonc
 {
   "server": "geo-region-inference",
-  "server_version": "2.1.0",
+  "server_version": "2.3.0",
   "feature_count": 2,
+  "input_meta": {
+    "source_path": "D:/项目/地块.geojson",
+    "crs": { "source_epsg": 4509, "target_epsg": 4326, "reprojected": true, "crs_assumed": false },
+    "z_stripped": false
+  },
+  "input_alerts": [
+    { "code": "CRS_ASSUMED", "severity": "warning", "user_message": "..." }
+  ],
+  "online_summary": {
+    "channels": { "amap": { "status": "unavailable", "reason_code": "NO_API_KEY", "reason": "..." }, "...": "..." },
+    "all_channels_unavailable": true,
+    "warnings": ["高德: AMAP_KEY not configured", "..."],
+    "user_message": "所有在线数据源均不可用..."
+  },
   "features": [ /* 见下 */ ]
 }
 ```
 
-单次请求最多 **80** 个 feature（`MAX_FEATURES`），超限返回 error。
+- **`input_alerts`**：Agent **必须**向用户转述（与 `online_summary.warnings` 同级）。`CRS_ASSUMED` 表示文件未声明坐标系、已假定 WGS84。
+- **`online_summary`**：仅当 `search_projects` 或 `search_poi` 为 true 时出现。`all_channels_unavailable=true` 表示三通道均无 `ok`/`empty`，**不是**「无项目」。
+- 单次请求最多 **80** 个 feature（`MAX_FEATURES`），超限返回 error。
+
+### 破坏性变更（v2.3）
+
+- 已移除 feature 级 `coordinate_system_warning`；CRS 信息见 `input_meta.crs`。
+- 输入经 `normalize_geo_input` 重投影为 WGS84 后再做几何统计；无 CRS 的投影坐标会直接报错。
 
 ## 每个 feature
 
@@ -51,7 +72,7 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 ### 几何说明
 
 - 多环 Polygon 的 `centroid` 为 **shoelace 面积加权质心**，不是简单顶点平均或 bbox 中心。
-- `coordinate_system_warning` 出现时，坐标被当作已投影米制处理。
+- 输入坐标在 MCP 内统一为 **WGS84 (EPSG:4326)**；带 CRS 的 GeoJSON（如 EPSG:4509）会经 pyproj 自动重投影。
 
 ### `data_source`
 
@@ -104,6 +125,7 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 | `TIMEOUT` | 超时 |
 | `UPSTREAM_ERROR` | 上游 HTTP/业务错误 |
 | `INVALID_RESPONSE` | 响应非 JSON 或结构异常 |
+| `DISABLED` | 被 `OSM_ENABLED=false` 关闭，未发起任何 Overpass 请求 |
 
 `error` 时 `reason` 为供应商原始信息摘要；`empty` 时通常无 `reason_code`。
 
@@ -127,7 +149,8 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `geojson` | — | FeatureCollection / Feature / 裸 geometry |
+| `geojson` | — | FeatureCollection / Feature / 裸 geometry（与 `input_path` 二选一） |
+| `input_path` | — | 本地 `.json`/`.geojson` 路径，**大文件推荐**（与 `geojson` 二选一） |
 | `search_projects` | `true` | 项目关键词 POI 检索 |
 | `search_poi` | `true` | 仅当 `search_projects=false` 时有泛搜意义；为 true 时**不会**加倍请求 |
 | `expand_radius_if_needed` | `true` | 无直接项目证据时扩圈一次（约 2.5×，上限 5000m） |
@@ -142,6 +165,25 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 | `AMAP_KEY` | 高德 Web 服务 Key |
 | `BAIDU_AK` | 百度服务端 AK |
 | `OVERPASS_URL` | Overpass 端点，默认公共 API |
+| `OSM_ENABLED` | 是否查询 Overpass，默认 `true`；设 `false` 可跳过所有 OSM 请求（如沙箱 egress 拦截 Overpass 主机时，避免 ~20s 超时等待），OSM 返回 `unavailable` + `reason_code=DISABLED` |
 | `HTTP_TIMEOUT_SECONDS` | HTTP 超时（默认 12） |
+| `GEO_INPUT_MAX_BYTES` | 文件输入大小上限（默认 67108864） |
+| `GEO_INPUT_STRICT` | 设为 `true` 时启用路径沙箱（须在 `GEO_INPUT_ROOT` 下） |
+| `GEO_INPUT_ROOT` | 严格模式根目录（默认用户主目录） |
 
 配置细节见 [map_api_setup.md](map_api_setup.md)。
+
+**依赖**：MCP Server 需 `pip install -r requirements-mcp.txt`（含 `pyproj` 用于 CRS 重投影）。
+
+## 实现注记（当前行为，待进一步确认）
+
+### MCP 协议版本
+
+- `server/discover` 的 `supportedVersions` 包含 `2026-07-28` 与 `2025-11-25`。
+- `initialize` 当前**固定协商** `2025-11-25`（见 `mcp_server.negotiate_initialize` 与 `tests/test_offline.py`）。
+- 与 `discover` 所列新版不一致的原因**尚未在仓库 commit 中明确记录**；**暂不建议改动**，除非确认 Host 兼容性。
+
+### `search_poi` 与 `search_projects=false`
+
+- `keywords=None` 时：**百度**使用 `BAIDU_DEFAULT_QUERY` 泛搜；**高德**不传 `keywords` 参数（周边全类 POI）。
+- 两源「泛搜」行为**不对称**；是否为产品设计**待确认**。文档与测试仅保证不传项目关键词，不保证两源等价。

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 REQUIRED_TOP_KEYS = {
@@ -12,43 +13,25 @@ REQUIRED_TOP_KEYS = {
     "related_projects",
 }
 REQUIRED_CANDIDATE_KEYS = {"label", "confidence", "evidence"}
+REQUIRED_PROJECT_KEYS = {"label", "confidence", "evidence", "evidence_type"}
 VALID_DATA_SOURCES = {"amap", "baidu", "osm", "offline", "hybrid"}
 
-# Phrases that mention project-name markers while stating they were NOT found.
-NEGATED_DIRECT_PHRASES = (
-    "未发现直接项目名称",
-    "未发现直接项目名",
-    "未发现直接项目",
-    "没有直接项目名称",
-    "未见直接项目",
-    "无直接项目名称",
-    "无直接项目线索",
-    "未发现直接项目线索",
-)
+VALID_EVIDENCE_TYPES = {
+    "gov_publicity",
+    "gov_publicity_weak",
+    "poi_name",
+    "attribute_field",
+    "project_number",
+    "inferred",
+}
+DIRECT_EVIDENCE_TYPES = {"gov_publicity", "poi_name", "attribute_field", "project_number"}
+GOV_EVIDENCE_TYPES = {"gov_publicity", "gov_publicity_weak"}
+URL_PATTERN = re.compile(r"^https?://", re.I)
 
-DIRECT_MARKERS = (
-    "项目名称",
-    "项目名",
-    "project_name",
-    "project_no",
-    "project_id",
-    "project_code",
-    "plan_id",
-    "plan_no",
-    "planning_id",
-    "permit_no",
-    "permit_id",
-    "备案",
-    "规划",
-    "公示",
-    "POI",
-    "OSM name",
-    "construction",
-    "在建",
-    "建设中",
-    "工地",
-    "工程名称",
-)
+CONFIDENCE_CAP = {
+    "inferred": 0.4,
+    "gov_publicity_weak": 0.3,
+}
 
 
 def schema_data_source(source_names: list[Any]) -> str:
@@ -60,28 +43,56 @@ def schema_data_source(source_names: list[Any]) -> str:
     return "hybrid"
 
 
+def _valid_url(url: Any) -> bool:
+    return isinstance(url, str) and bool(URL_PATTERN.match(url.strip()))
+
+
 def _check_project_candidate(item: dict[str, Any], index: int, errors: list[str]) -> None:
-    evidence = str(item.get("evidence", ""))
+    et = item.get("evidence_type")
     supported_by = item.get("supported_by")
     conf = item.get("confidence")
-    scanned = evidence
-    for phrase in NEGATED_DIRECT_PHRASES:
-        scanned = scanned.replace(phrase, "")
-    has_direct = any(m in scanned for m in DIRECT_MARKERS)
+    source_url = item.get("source_url")
 
-    if conf > 0.6 and not has_direct:
+    if et not in VALID_EVIDENCE_TYPES:
         errors.append(
-            f"related_projects[{index}].confidence > 0.6 requires direct project evidence "
-            "(project name/number, planning/filing/public notice, or explicit construction-status naming)"
+            f"related_projects[{index}].evidence_type must be one of {sorted(VALID_EVIDENCE_TYPES)}, got {et!r}"
         )
-    if not has_direct and conf > 0.4:
+        return
+
+    if not isinstance(conf, (int, float)):
+        return
+
+    cap = CONFIDENCE_CAP.get(str(et))
+    if cap is not None and conf > cap + 1e-9:
+        errors.append(f"related_projects[{index}].confidence cannot exceed {cap} for evidence_type={et!r}")
+
+    if et in DIRECT_EVIDENCE_TYPES and conf > 0.6 + 1e-9:
+        pass  # allowed
+    elif conf > 0.6 + 1e-9:
         errors.append(
-            f"related_projects[{index}].confidence cannot exceed 0.4 without direct project evidence"
+            f"related_projects[{index}].confidence > 0.6 requires a direct evidence_type "
+            f"({sorted(DIRECT_EVIDENCE_TYPES)}), got {et!r}"
         )
-    if not has_direct and (not isinstance(supported_by, str) or not supported_by.strip()):
-        errors.append(
-            f"related_projects[{index}] requires non-empty supported_by when evidence is indirect"
-        )
+
+    if et == "inferred":
+        if not isinstance(supported_by, str) or not supported_by.strip():
+            errors.append(f"related_projects[{index}] requires non-empty supported_by when evidence_type is inferred")
+
+    if et == "gov_publicity":
+        if not _valid_url(source_url):
+            errors.append(
+                f"related_projects[{index}] requires source_url (http/https) when evidence_type is gov_publicity"
+            )
+
+    if et == "gov_publicity_weak":
+        if source_url is not None and source_url != "" and not _valid_url(source_url):
+            errors.append(f"related_projects[{index}].source_url must be http/https when provided")
+
+    if et not in DIRECT_EVIDENCE_TYPES and et != "gov_publicity_weak":
+        if not isinstance(supported_by, str) or not supported_by.strip():
+            errors.append(
+                f"related_projects[{index}] requires non-empty supported_by when evidence_type is {et!r}"
+            )
 
 
 def _check_candidate_list(name: str, items: Any, errors: list[str]) -> None:
@@ -92,11 +103,12 @@ def _check_candidate_list(name: str, items: Any, errors: list[str]) -> None:
         errors.append(f"{name} must not be empty (use a low-confidence 'unknown' candidate instead of omitting)")
         return
     prev_conf = None
+    required = REQUIRED_PROJECT_KEYS if name == "related_projects" else REQUIRED_CANDIDATE_KEYS
     for i, item in enumerate(items):
         if not isinstance(item, dict):
             errors.append(f"{name}[{i}] must be an object")
             continue
-        missing = REQUIRED_CANDIDATE_KEYS - item.keys()
+        missing = required - item.keys()
         if missing:
             errors.append(f"{name}[{i}] missing keys: {sorted(missing)}")
             continue
@@ -111,7 +123,7 @@ def _check_candidate_list(name: str, items: Any, errors: list[str]) -> None:
             errors.append(f"{name} not sorted descending by confidence at index {i} ({conf} > {prev_conf})")
         if isinstance(conf, (int, float)):
             prev_conf = conf
-        if name == "related_projects" and isinstance(conf, (int, float)):
+        if name == "related_projects" and isinstance(conf, (int, float)) and "evidence_type" in item:
             _check_project_candidate(item, i, errors)
 
 

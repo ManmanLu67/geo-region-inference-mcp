@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# DEPRECATED — 见 scripts/README.md
 """CLI wrapper for Baidu place search (+ conditional regeo via geo_clients)."""
 import json
 import os

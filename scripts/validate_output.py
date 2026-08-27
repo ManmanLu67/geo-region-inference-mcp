@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# DEPRECATED — 见 scripts/README.md
 """
 validate_output.py — Validate the final inference result against the schema
 in references/output_schema.md before showing it to the user. Catches the

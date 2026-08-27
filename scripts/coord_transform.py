@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# DEPRECATED — 见 scripts/README.md
 """CLI wrapper around geo_clients coordinate transforms."""
 import json
 import os

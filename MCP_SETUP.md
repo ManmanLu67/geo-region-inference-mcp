@@ -17,6 +17,9 @@ Agent / LLM
    |     - JSON-RPC / tool orchestration
    |     - batch geometry + analyze_regions
    |
+   +-- geo_input.py / geo_geometry.py
+   |     - file load, CRS, geometry stats
+   |
    +-- geo_clients.py
          - sync httpx client (singleton)
          - coordinate transforms
@@ -40,7 +43,7 @@ source .venv/bin/activate
 pip install -r requirements-mcp.txt
 ```
 
-Runtime dependency is `httpx` (`pip install -r requirements-mcp.txt`). No official `mcp` SDK and no GIS stack. After pulling this repo, reinstall into the persistent `.venv` once.
+Runtime dependencies: **httpx** + **pyproj** (CRS reprojection only; no GDAL/GeoPandas). No official `mcp` SDK. After pulling, reinstall into the persistent `.venv` once.
 
 ## Run
 
@@ -57,6 +60,7 @@ The server uses stdio and stays alive until the MCP host closes the connection.
 | `AMAP_KEY` | No | AMap Web service key |
 | `BAIDU_AK` | No | Baidu server-side AK |
 | `OVERPASS_URL` | No | Overpass endpoint (default public API) |
+| `OSM_ENABLED` | No | Whether to query Overpass; default `true`. Set `false` to skip all OSM requests (e.g. when the Overpass host is blocked by an egress allowlist, avoiding a ~20s timeout wait) |
 | `HTTP_TIMEOUT_SECONDS` | No | HTTP timeout in seconds (default 12) |
 
 Set keys in the MCP host `env` block. Do not put keys into `SKILL.md` or commit them to the repository.
@@ -65,21 +69,15 @@ Set keys in the MCP host `env` block. Do not put keys into `SKILL.md` or commit 
 
 ### `analyze_regions`
 
-Preferred tool. Input: GeoJSON `FeatureCollection`, `Feature`, or bare geometry.
+Preferred tool. Input: inline GeoJSON **or** `input_path` to a local `.json`/`.geojson` file (exactly one required).
 
+- Normalizes CRS via pyproj to WGS84; rejects Esri REST JSON with a friendly export hint.
 - Computes geometry for all features (max **80** features per call).
 - Concurrent AMap/Baidu/OSM; OSM batched up to 10 centroids per Overpass HTTP call.
 - Expands radius once if no direct project evidence (`expand_radius_if_needed`, default true).
-- Returns compact evidence per feature; see [mcp_evidence_schema.md](references/mcp_evidence_schema.md).
+- Returns `input_meta`, `input_alerts`, `online_summary` (when online), and compact evidence per feature; see [mcp_evidence_schema.md](references/mcp_evidence_schema.md).
 
-**Parameters:**
-
-| Param | Default | Notes |
-|-------|---------|-------|
-| `search_projects` | true | Project-keyword POI search |
-| `search_poi` | true | General nearby search only when `search_projects` is false; does **not** add a second query when both are true |
-| `expand_radius_if_needed` | true | One expansion (~2.5×, cap 5000m) |
-| `max_workers` | 8 | Capped at 8; AMap/Baidu pool capped at 4 |
+**Parameters:** see [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md) (full table + env vars).
 
 If both `search_projects` and `search_poi` are false, no online APIs are called.
 
@@ -109,7 +107,7 @@ The server uses a bounded `ThreadPoolExecutor` for I/O-bound network calls. API 
 
 ## Backward compatibility
 
-`scripts/` remain as legacy/manual fallbacks. `query_*.py` and `coord_transform.py` are thin wrappers around `geo_clients.py` (same HTTP layer as MCP). They are not the main Skill execution path.
+`scripts/` is **deprecated** — see [scripts/README.md](scripts/README.md). Do not use as the Skill execution path.
 
 ## Recommended host configuration
 
@@ -126,6 +124,7 @@ For example:
         "AMAP_KEY": "...",
         "BAIDU_AK": "...",
         "OVERPASS_URL": "https://overpass-api.de/api/interpreter",
+        "OSM_ENABLED": "true",
         "HTTP_TIMEOUT_SECONDS": "12"
       }
     }
