@@ -13,8 +13,15 @@ import httpx
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT_SECONDS", "12"))
 OVERPASS_URL = os.environ.get("OVERPASS_URL", "https://overpass-api.de/api/interpreter")
 OVERPASS_BATCH_SIZE = 10
+# Set OSM_ENABLED=false to skip all Overpass calls (e.g. when the Overpass host
+# is blocked by an egress allowlist). Defaults to enabled.
+OSM_ENABLED = os.environ.get("OSM_ENABLED", "true").strip().lower() not in (
+    "0", "false", "no", "off"
+)
 BAIDU_DEFAULT_QUERY = "公司|住宅|写字楼|生活服务"
 PROJECT_KEYWORDS = "在建|项目|工地|建设"
+EXPAND_RADIUS_FACTOR = 2.5
+EXPAND_RADIUS_MAX_M = 5000.0
 
 NO_API_KEY = "NO_API_KEY"
 INVALID_API_KEY = "INVALID_API_KEY"
@@ -23,15 +30,14 @@ TIMEOUT = "TIMEOUT"
 HTTP_ERROR = "HTTP_ERROR"
 UPSTREAM_ERROR = "UPSTREAM_ERROR"
 INVALID_RESPONSE = "INVALID_RESPONSE"
+DISABLED = "DISABLED"
 
 X_PI = math.pi * 3000.0 / 180.0
 PI = math.pi
 A = 6378245.0
 EE = 0.00669342162296594323
 
-
-def deg_to_m_factors(lat_deg: float) -> tuple[float, float]:
-    return 111320.0 * math.cos(math.radians(lat_deg)), 111320.0
+from geo_geometry import deg_to_m_factors  # noqa: E402
 
 
 def _out_of_china(lon: float, lat: float) -> bool:
@@ -186,7 +192,12 @@ def has_admin_context(src: dict[str, Any] | None) -> bool:
 class GeoHTTPClient:
     def __init__(self) -> None:
         self.counts = {"amap": 0, "baidu": 0, "overpass": 0, "total": 0}
-        self.client = httpx.Client(timeout=httpx.Timeout(HTTP_TIMEOUT))
+        # Overpass public endpoint rejects requests without a User-Agent (HTTP 406);
+        # set a default UA so all channels (Overpass/AMap/Baidu) are accepted.
+        self.client = httpx.Client(
+            timeout=httpx.Timeout(HTTP_TIMEOUT),
+            headers={"User-Agent": "geo-region-inference/2.1.0 (analysis)"},
+        )
 
     def reset_counts(self) -> None:
         self.counts = {"amap": 0, "baidu": 0, "overpass": 0, "total": 0}
@@ -382,6 +393,8 @@ def _post_overpass(query: str) -> Any:
 
 
 def overpass_query(lat: float, lon: float, radius: float) -> dict[str, Any]:
+    if not OSM_ENABLED:
+        return _source_shell("osm", status="unavailable", reason_code=DISABLED, reason="OSM disabled via OSM_ENABLED")
     query = f"[out:json][timeout:20];({_overpass_around_clause(lat, lon, radius)});out center tags;"
     try:
         raw = _post_overpass(query)
@@ -400,6 +413,12 @@ def overpass_query_batch(points: list[tuple[int, float, float, float]]) -> dict[
     """points: (index, lat, lon, radius). One HTTP call per OVERPASS_BATCH_SIZE points."""
     out: dict[int, dict[str, Any]] = {}
     if not points:
+        return out
+    if not OSM_ENABLED:
+        for idx, *_ in points:
+            out[idx] = _source_shell(
+                "osm", status="unavailable", reason_code=DISABLED, reason="OSM disabled via OSM_ENABLED"
+            )
         return out
     for start in range(0, len(points), OVERPASS_BATCH_SIZE):
         chunk = points[start : start + OVERPASS_BATCH_SIZE]

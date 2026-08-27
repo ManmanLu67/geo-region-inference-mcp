@@ -6,7 +6,7 @@ MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 f
 |---|---|---|---|
 | 高德(AMap) | 需要 `AMAP_KEY` | 好 | 周边 POI；around 结果里没有行政区时才补一次逆地理 |
 | 百度(Baidu) | 需要 `BAIDU_AK` | 好 | 交叉验证；同样仅在缺行政区时 regeo |
-| OSM(Overpass) | 不需要 | 国内城市一般、偏远较差 | 免费 landuse；按质心批量查询，不做 regeo |
+| OSM(Overpass) | 不需要（可用 `OSM_ENABLED=false` 关闭） | 国内城市一般、偏远较差 | 免费 landuse；按质心批量查询，不做 regeo |
 | 离线推理 | 不需要 | — | 以上均不可用或为空时的兜底 |
 
 ## 怎么申请 Key

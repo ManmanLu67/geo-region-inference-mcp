@@ -7,6 +7,7 @@
         "AMAP_KEY": "YOUR_AMAP_KEY",
         "BAIDU_AK": "YOUR_BAIDU_AK",
         "OVERPASS_URL": "https://overpass-api.de/api/interpreter",
+        "OSM_ENABLED": "true",
         "HTTP_TIMEOUT_SECONDS": "12"
       }
     }
