@@ -19,7 +19,21 @@ candidate_count > 0 → 对每个 candidate 按轮检索
 
 **empty_only**：MCP 已有 `project_evidence` 的地物不会进入 `candidates`。
 
-**前置条件**：至少能构建 **区/县级** 行政区（`admin.district_label`）。无区县级则跳过。
+**前置条件**：至少能构建 **区/县级** 行政区（`admin.district_label`）。无区县级则跳过 MCP 计划（见下节 **无 map 源时的 Agent 检索**）。
+
+### 无 map 源时的 Agent 检索
+
+下列情况 `prepare_gov_web_search` 可能返回 `candidate_count = 0`（常见原因：`skipped_summary.no_admin`、全部 map 源 `unavailable`/`empty`）——**不等于**禁止 Web 检索：
+
+1. 读 `analyze_regions` 的 `online_summary`；若 `all_channels_unavailable`，说明无 map 在线证据。
+2. 从**输入数据**提取检索线索（优先级从高到低）：
+   - 属性中的**地址、地块编号、项目/备案/规划编号、行政区字段**；
+   - 用户文件名、对话中给出的地名/道路/项目名；
+   - MCP 几何/bbox 仅作弱辅助（勿单独当地名）。
+3. Agent **自行构造** `web_search` query（不必等 MCP 四轮模板）；仍优先 `.gov.cn`，匹配规则与分轮 SOP 相同。
+4. 写最终结果：`data_source: hybrid`（**场景 4**：无 map 源 + 输入线索 Web 检索）；`related_projects` 用对应 `evidence_type`（政府强证据仍须 `source_url`）。
+
+若输入中也无任何可检索文字线索，才在 `offline` 下仅用几何/属性做 `inferred`（≤0.4）。
 
 ## 2. 分轮穷尽机制
 

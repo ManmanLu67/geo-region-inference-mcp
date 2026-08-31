@@ -155,6 +155,7 @@ MCP 返回 **四轮** `search_plan`（街道核心词 → 街道同义词 → �
 - `gov_publicity`（strong）可 >0.6；`gov_publicity_weak`（仅同区活动、未对应地块）≤0.3；四轮均无 gov 强证据后用 `inferred`（≤0.4）。
 - 禁止把同一篇公示里所有项目都收进结果；禁止整段摘抄网页原文。
 - 无 `web_search` 能力时跳过本步，在 evidence 中说明未做政府 Web 检索；**不是** pipeline 失败。
+- **无 map 源**（`online_summary.all_channels_unavailable`）或 `prepare_gov_web_search` 返回 `candidate_count = 0` 时：从输入 **properties / 用户说明** 提取地址、编号、地名等线索，Agent 自行 `web_search`；有 Web 证据支撑项目结论时 `data_source` 用 **`hybrid`（场景 4）**，见 [output_schema.md](references/output_schema.md)。
 
 ## 第四步：语义推理——最终目标是 `related_projects`
 

@@ -59,7 +59,7 @@
 2. `confidence` 必须位于 0–1，并按降序排列（允许相等）。
 3. `evidence` 必须具体、可追溯，说明属性字段、MCP 数据源、POI 名称、OSM 标签、政府公示或几何特征。
 4. 禁止无来源地虚构具体项目名称。
-5. `data_source` 要如实反映真正起作用的**地图/API 数据源**（见下）；政府 Web 证据通过 `related_projects[].evidence_type` 体现。
+5. `data_source` 要如实反映真正起作用的**地图/API 数据源**（见下）；政府 Web 证据通过 `related_projects[].evidence_type` 体现。无 map 源但输入线索 + Web 检索共同支撑结论时，用 `hybrid`（见第 4 种场景）。
 6. 不要把 MCP 的原始 API 响应或政府网页全文复制进最终结果；只保留支持结论所需的证据摘要。
 
 ## `data_source` 与 `hybrid`
@@ -68,9 +68,10 @@
 
 1. **多地图源**：两个及以上 map 源（amap/baidu/osm）均 `status=ok` 并参与结论；
 2. **地图 + 离线补充**：部分 map 源失败或为空，用几何/属性弱证据补足；
-3. **地图 + 政府 Web**：map 证据与政府公示检索共同支撑 `related_projects`（政府侧用 `evidence_type: gov_publicity` 等标注，不改变顶层 `data_source` 枚举）。
+3. **地图 + 政府 Web**：map 证据与政府公示检索共同支撑 `related_projects`（政府侧用 `evidence_type: gov_publicity` 等标注）；
+4. **无地图源 + Web 检索**：全部 map 源不可用、为空或未参与结论（`online_summary.all_channels_unavailable` 或等效情况），但**输入数据本身**（属性字段中的地址/地块编号/项目名/行政区文字、文件名、用户补充说明，以及 MCP 返回的几何/bbox 弱线索）足以构造检索词，Agent 用 `web_search` / `web_fetch`（含政府公示）取得证据并支撑 `related_projects`。此时顶层仍用 `hybrid`，在 evidence 中写明「无 map 源，检索词来自输入属性/…」；gov 侧仍用 `evidence_type` / `source_url`。
 
-单源成功仍用 `amap` / `baidu` / `osm`；全无在线 map 源用 `offline`。
+单源 map 成功仍用 `amap` / `baidu` / `osm`。**仅**几何时用 `offline`（无 map、也未用 Web 检索支撑项目结论）。
 
 ## `related_projects` 的特殊要求
 

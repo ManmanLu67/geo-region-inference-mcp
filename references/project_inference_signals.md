@@ -89,4 +89,6 @@ Skill 默认地图源为高德、百度、OSM/Overpass；**政府公示 Web 检�
 
 政府 Web 强证据应优先提取：项目名称、建设单位、项目/备案/规划编号、地块编号、地址、公示日期；写入 `related_projects` 时用 `evidence_type: gov_publicity`（strong 匹配，须 `source_url`）或 `gov_publicity_weak`（仅同区活动，≤0.3）。
 
-政府 Web 证据与 map 源共同支撑结论时，顶层 `data_source` 仍描述 map 参与情况；gov 侧通过 `evidence_type` 体现（见 output_schema hybrid 第三种场景）。
+政府 Web 证据与 map 源共同支撑结论时，顶层 `data_source` 仍描述 map 参与情况；gov 侧通过 `evidence_type` 体现（见 output_schema hybrid 第 3 种场景）。
+
+**无 map 源时**：若属性/用户说明中有地址、编号、项目名等可检索线索，Agent 仍应做 Web 检索（`prepare_gov_web_search` 无 admin 时可自行组 query）；项目结论由 Web 证据支撑时，`data_source` 用 **`hybrid`（第 4 种：无 map + 输入线索 Web）**，勿误标为已有 map 核验。
