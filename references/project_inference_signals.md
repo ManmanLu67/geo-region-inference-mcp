@@ -83,7 +83,10 @@
 
 ## 7. 政府公示信息
 
-当前 skill 默认数据源为高德、百度、OSM/Overpass，尚未接入地方政府规划公示/项目备案网站。
-因此，不要假装已经完成政府公示核验。
+Skill 默认地图源为高德、百度、OSM/Overpass；**政府公示 Web 检索**在 `analyze_regions` 之后由 Agent 执行（MCP `prepare_gov_web_search` 生成四轮搜索计划，Agent 用 `web_search`/`web_fetch` 检索 `.gov.cn`）。
 
-未来接入公示数据时，应优先提取：项目名称、建设单位、项目编号/备案号、规划许可编号、地块编号、地址和公示日期，并将其作为最高等级的直接证据。
+流程见 [gov_web_search_guide.md](gov_web_search_guide.md)。**未完成第三步检索前**，不要写 `evidence_type: gov_publicity` 或假装已核验政府公示。
+
+政府 Web 强证据应优先提取：项目名称、建设单位、项目/备案/规划编号、地块编号、地址、公示日期；写入 `related_projects` 时用 `evidence_type: gov_publicity`（strong 匹配，须 `source_url`）或 `gov_publicity_weak`（仅同区活动，≤0.3）。
+
+政府 Web 证据与 map 源共同支撑结论时，顶层 `data_source` 仍描述 map 参与情况；gov 侧通过 `evidence_type` 体现（见 output_schema hybrid 第三种场景）。

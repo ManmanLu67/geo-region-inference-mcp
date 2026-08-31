@@ -28,10 +28,11 @@ from geo_clients import (
 )
 from geo_geometry import feature_list, geometry_stats, radius_from_stats
 from geo_input import normalize_geo_input
+from gov_search import prepare_gov_web_search
 from validation import schema_data_source, validate_payload
 
 SERVER_NAME = "geo-region-inference"
-SERVER_VERSION = "2.3.0"
+SERVER_VERSION = "2.4.0"
 
 _CHANNEL_RANK = {"ok": 4, "empty": 3, "error": 2, "unavailable": 1}
 MAX_FEATURES = 80
@@ -372,6 +373,19 @@ TOOLS = {
         "description": "Validate one feature inference result against the Skill's output and project-confidence rules.",
         "inputSchema": {"type": "object", "properties": {"result": {"type": "object"}}, "required": ["result"]},
     },
+    "prepare_gov_web_search": {
+        "description": "After analyze_regions: build a four-round government web search plan for features without direct project_evidence and with district-level admin context. No HTTP; Agent runs web_search/web_fetch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "analyze_result": {
+                    "type": "object",
+                    "description": "Full analyze_regions response body (features with sources/places/roads).",
+                }
+            },
+            "required": ["analyze_result"],
+        },
+    },
 }
 
 
@@ -446,6 +460,11 @@ def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         )
     if name == "validate_result":
         return ok(validate_result(args["result"]))
+    if name == "prepare_gov_web_search":
+        analyze_result = args.get("analyze_result")
+        if not isinstance(analyze_result, dict):
+            return err("analyze_result must be an object")
+        return ok(prepare_gov_web_search(analyze_result))
     return err(f"Unknown tool: {name}")
 
 

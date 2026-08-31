@@ -16,4 +16,4 @@ mcp_config.json
 Thumbs.db
 .headroom-cache/
 tests/扬尘源矢量
-tests/fixtures
+tests/fixtures/*.local.*

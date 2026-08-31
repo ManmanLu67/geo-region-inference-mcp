@@ -20,6 +20,10 @@ Agent / LLM
    +-- geo_input.py / geo_geometry.py
    |     - file load, CRS, geometry stats
    |
+   +-- gov_search.py
+   |     - admin/road extraction
+   |     - multi-round gov web search plan (no HTTP)
+   |
    +-- geo_clients.py
          - sync httpx client (singleton)
          - coordinate transforms
@@ -42,6 +46,14 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-mcp.txt
 ```
+
+`requirements-mcp.txt` includes Tsinghua PyPI mirror options (`--index-url`, `--trusted-host`) for CN users. If that mirror times out, retry with Aliyun:
+
+```bash
+pip install -r requirements-mcp.txt --index-url https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+```
+
+See [`pip.ini.example`](pip.ini.example) for optional global pip mirror config.
 
 Runtime dependencies: **httpx** + **pyproj** (CRS reprojection only; no GDAL/GeoPandas). No official `mcp` SDK. After pulling, reinstall into the persistent `.venv` once.
 
@@ -91,7 +103,11 @@ One-point targeted project evidence search. AMap, Baidu, and OSM run concurrentl
 
 ### `validate_result`
 
-Validates the final semantic result against the Skill's confidence/evidence rules (not MCP evidence).
+Validates the final semantic result against the Skill's confidence/evidence rules (`evidence_type`, `source_url` for gov publicity).
+
+### `prepare_gov_web_search`
+
+After `analyze_regions`. Input the full analyze response; output a four-round `search_plan` for features without direct `project_evidence` and with district-level admin. **No HTTP** — Agent runs `web_search` / `web_fetch`. See [gov_web_search_guide.md](references/gov_web_search_guide.md).
 
 ## Performance model
 

@@ -28,9 +28,9 @@ description: >-
 ```text
 analyze_regions(整个 GeoJSON/FeatureCollection)
         ↓
-一次性得到所有地物的几何 + 项目导向在线证据
+prepare_gov_web_search → Agent 分轮 web_search/fetch（可选）
         ↓
-LLM 做语义推理
+LLM 做语义推理（含 evidence_type / source_url）
         ↓
 validate_result(最终结果)
 ```
@@ -46,7 +46,7 @@ validate_result(最终结果)
 **ArcGIS 用户（推荐流程）**
 
 1. 在 ArcGIS 中将图层 **导出为 GeoJSON**（`.geojson` 或 `.json`）。
-2. 坐标系优先选 **WGS 1984 (EPSG:4326)**；若数据为 CGCS2000 高斯投影（如 EPSG:4509），导出时保留坐标系信息即可，MCP 会自动重投影到 WGS84。
+2. 坐标系优先选 **WGS 1984 (EPSG:4326)**；若数据为其他，导出时保留坐标系信息即可，MCP 会自动重投影到 WGS84。
 3. **不要**直接把 Esri REST JSON（含 `rings`/`attributes` 的 ArcGIS 接口格式）传给 MCP；若误传，MCP 会提示重新导出为 GeoJSON。
 
 **大文件 / 顶点多**
@@ -135,7 +135,28 @@ Key 配置参照 [map_api_setup.md](references/map_api_setup.md)。
 
 如果返回的多个来源明显矛盾，不要只选“看起来更像”的一个；将冲突作为 evidence 的一部分保留。
 
-## 第三步：语义推理——最终目标是 `related_projects`
+## 第三步：政府公示 Web 检索（Agent + web 工具）
+
+在第二步 `analyze_regions` 返回**含行政区划**的证据后，对尚无 MCP 直接 `project_evidence` 的地物，调用：
+
+```text
+prepare_gov_web_search(analyze_result)
+```
+
+MCP 返回 **四轮** `search_plan`（街道核心词 → 街道同义词 → 区级+道路交叉 → 纯地名/间接线索）。Agent 用 **`web_search` / `web_fetch`** 按轮执行，**不是** `scripts/` 脚本。
+
+详细 SOP：[gov_web_search_guide.md](references/gov_web_search_guide.md)。
+
+要点：
+
+- **宁可多搜，不可漏搜**：宁可多轮尝试，无公示项目也要判断是否**与本地块**匹配；查不到是常态。
+- **分级推进**：本轮所有 query 均无 `.gov.cn` 命中 → 下一轮；**strong 匹配** → 停止后续轮次。
+- 第三步产出 `gov_web_notes`（含 `source_url`、`match: strong|weak`）；第四步写 `related_projects` 时填写 **`evidence_type`**，政府强证据必填 **`source_url`**。
+- `gov_publicity`（strong）可 >0.6；`gov_publicity_weak`（仅同区活动、未对应地块）≤0.3；四轮均无 gov 强证据后用 `inferred`（≤0.4）。
+- 禁止把同一篇公示里所有项目都收进结果；禁止整段摘抄网页原文。
+- 无 `web_search` 能力时跳过本步，在 evidence 中说明未做政府 Web 检索；**不是** pipeline 失败。
+
+## 第四步：语义推理——最终目标是 `related_projects`
 
 **本步骤最重要、最优先得到的信息是相关建设项目。**
 
@@ -179,14 +200,17 @@ related_projects                   ← 最终目标
 
 ### `related_projects` 置信度规则
 
+- 每条 `related_projects` **必须**填写 `evidence_type`（见 [output_schema.md](references/output_schema.md)）；校验读字段，**不**从 evidence 文本猜 direct/indirect。
+- `inferred`：**≤0.4**，须 `supported_by`。
+- `gov_publicity_weak`：**≤0.3**（同区有建设活动、未能对应本地块）。
+- `gov_publicity` / `poi_name` / `attribute_field` / `project_number`：有直接证据时可 >0.6；`gov_publicity` 须 `source_url`。
 - 没有直接项目名称/编号/公示线索时，`related_projects.confidence` **不得超过 0.4**；
-- 只有直接项目名称、备案/规划编号、政府公示信息，或明确名称 + 建设状态组合证据时，才允许 `>0.6`；
 - 即使 `region_type` 置信度很高，也不能因此提高具体项目名称的置信度；
 - 间接项目判断必须用 `supported_by` 指向具体的 `region_type` / `possible_buildings` 候选；
 - 没有来源支持时，禁止编造具体项目名，应使用“住宅类建设项目，具体名称未知”等类型化表达；
 - 信息少时宁可只给 1 条可靠候选，不要为了凑数量制造弱证据。
 
-## 第四步：按 Schema 组织结果
+## 第五步：按 Schema 组织结果
 
 严格按照 [output_schema.md](references/output_schema.md) 输出。
 
@@ -210,7 +234,7 @@ validate_result
 
 不要再执行 `python scripts/validate_output.py`（**已废弃**）。若校验失败，根据 `validate_result` 返回的 `errors` 修改后重试。
 
-## 第五步：呈现给用户
+## 第六步：呈现给用户
 
 每个地物一组，先给出 `related_projects` 主结论，再说明支持它的区域类型和建筑证据。
 

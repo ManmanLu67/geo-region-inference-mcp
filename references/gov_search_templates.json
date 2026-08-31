@@ -1,0 +1,65 @@
+{
+  "rounds": [
+    {
+      "round": 1,
+      "name": "street_core",
+      "admin_level": "street",
+      "templates": [
+        "{admin} 在建项目",
+        "{admin} 重点建设项目 公示",
+        "{admin} 规划公示",
+        "{admin} 土地出让公告"
+      ]
+    },
+    {
+      "round": 2,
+      "name": "street_synonyms",
+      "admin_level": "street",
+      "templates": [
+        "{admin} 施工许可公示",
+        "{admin} 建设工程规划许可",
+        "{admin} 建设工程规划许可证批后公示",
+        "{admin} 招标公告",
+        "{admin} 环评公示",
+        "{admin} 开工",
+        "{admin} 竣工"
+      ]
+    },
+    {
+      "round": 3,
+      "name": "district_road_cross",
+      "admin_level": "district",
+      "templates": [
+        "{admin} 在建项目",
+        "{admin} 规划公示",
+        "{admin} 重点工程"
+      ],
+      "road_templates": [
+        "{admin} {road} 建设项目",
+        "{admin} {road} 规划公示",
+        "{admin} {road} 施工许可"
+      ]
+    },
+    {
+      "round": 4,
+      "name": "place_indirect",
+      "admin_level": "place_only",
+      "enabled": true,
+      "road_templates": [
+        "{road} 项目",
+        "{road} 路口 建设",
+        "{road} 施工单位",
+        "{road} 工地"
+      ],
+      "intersection_templates": [
+        "{road_a} {road_b} 项目",
+        "{road_a} {road_b} 建设"
+      ]
+    }
+  ],
+  "limits": {
+    "max_search_per_feature": 24,
+    "max_fetch_per_feature": 4,
+    "stop_on_confirmed_match": true
+  }
+}

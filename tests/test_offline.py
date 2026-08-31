@@ -14,6 +14,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import geo_clients  # noqa: E402
+import gov_search  # noqa: E402
 import geo_input  # noqa: E402
 import mcp_server  # noqa: E402
 from geo_clients import (  # noqa: E402
@@ -28,6 +29,13 @@ from geo_clients import (  # noqa: E402
     overpass_query_batch,
     query_amap,
     query_baidu,
+)
+from gov_search import (  # noqa: E402
+    build_search_plan,
+    extract_admin_division,
+    extract_match_roads,
+    load_gov_search_templates,
+    prepare_gov_web_search,
 )
 from validation import collect_errors, schema_data_source, validate_payload  # noqa: E402
 
@@ -225,6 +233,121 @@ class ValidationTests(unittest.TestCase):
         }])
         errors = collect_errors(result)
         self.assertTrue(any("0.6" in e or "0.4" in e for e in errors))
+
+    def test_gov_publicity_requires_source_url(self):
+        result = _valid_result(related_projects=[{
+            "label": "某项目",
+            "confidence": 0.75,
+            "evidence_type": "gov_publicity",
+            "evidence": "规划公示转述",
+        }])
+        errors = collect_errors(result)
+        self.assertTrue(any("source_url" in e for e in errors))
+
+    def test_gov_publicity_weak_cap(self):
+        result = _valid_result(related_projects=[{
+            "label": "同区建设活动",
+            "confidence": 0.5,
+            "evidence_type": "gov_publicity_weak",
+            "evidence": "仅确认同区有公示，未能对应本地块",
+        }])
+        errors = collect_errors(result)
+        self.assertTrue(any("0.3" in e for e in errors))
+
+    def test_gov_publicity_with_url_passes(self):
+        result = _valid_result(related_projects=[{
+            "label": "XX路以东地块项目",
+            "confidence": 0.75,
+            "evidence_type": "gov_publicity",
+            "evidence": "自然资源局公示转述",
+            "source_url": "https://example.gov.cn/plan/1",
+        }])
+        self.assertEqual(collect_errors(result), [])
+
+    def test_missing_evidence_type_rejected(self):
+        result = _valid_result(related_projects=[{
+            "label": "x",
+            "confidence": 0.5,
+            "evidence": "e",
+        }])
+        errors = collect_errors(result)
+        self.assertTrue(any("evidence_type" in e for e in errors))
+
+
+class GovSearchTests(unittest.TestCase):
+    def _feature(self, *, project_evidence=None, places=None, roads=None, index=0):
+        sources = [{
+            "source": "amap",
+            "status": "ok",
+            "places": places or [
+                {"tag": "amap_city", "name": "广州市"},
+                {"tag": "amap_district", "name": "天河区"},
+                {"tag": "amap_township", "name": "猎德街道"},
+            ],
+            "roads": roads or [{"name": "猎德大道"}],
+        }]
+        feat = {"index": index, "sources": sources}
+        if project_evidence is not None:
+            feat["project_evidence"] = project_evidence
+        return feat
+
+    def test_extract_admin_street_label(self):
+        admin = extract_admin_division(self._feature())
+        self.assertEqual(admin["street_label"], "广州市天河区猎德街道")
+        self.assertEqual(admin["district_label"], "广州市天河区")
+        self.assertTrue(admin["has_district_level"])
+
+    def test_extract_admin_baidu_only(self):
+        feat = self._feature(places=[
+            {"tag": "baidu_city", "name": "广州市"},
+            {"tag": "baidu_district", "name": "天河区"},
+        ])
+        admin = extract_admin_division(feat)
+        self.assertEqual(admin["street_label"], "广州市天河区")
+        self.assertTrue(admin["has_district_level"])
+
+    def test_build_search_plan_four_rounds(self):
+        admin = extract_admin_division(self._feature())
+        roads = extract_match_roads(self._feature())
+        plan = build_search_plan(admin, roads, load_gov_search_templates())
+        self.assertGreaterEqual(len(plan["rounds"]), 3)
+        names = [r["name"] for r in plan["rounds"]]
+        self.assertIn("street_core", names)
+        self.assertIn("district_road_cross", names)
+
+    def test_query_cap_at_24(self):
+        admin = extract_admin_division(self._feature())
+        roads = ["路A", "路B", "路C", "路D", "路E"]
+        plan = build_search_plan(admin, roads, load_gov_search_templates())
+        total = sum(len(r["queries"]) for r in plan["rounds"])
+        self.assertLessEqual(total, 24)
+
+    def test_empty_only_skips_project_evidence(self):
+        analyze = {
+            "features": [
+                self._feature(project_evidence=[{"label": "已有项目"}]),
+                self._feature(index=1, project_evidence=[]),
+            ]
+        }
+        out = prepare_gov_web_search(analyze)
+        self.assertEqual(out["candidate_count"], 1)
+        self.assertEqual(out["candidates"][0]["index"], 1)
+        self.assertEqual(out["skipped_summary"]["has_project_evidence"], 1)
+
+    def test_prepare_skips_no_admin(self):
+        feat = {"index": 0, "sources": [{"source": "amap", "status": "ok", "places": [], "roads": []}]}
+        out = prepare_gov_web_search({"features": [feat]})
+        self.assertEqual(out["candidate_count"], 0)
+        self.assertEqual(out["skipped_summary"]["no_admin"], 1)
+
+    def test_mcp_tool_prepare_gov_web_search(self):
+        feat = self._feature(index=0)
+        feat["project_evidence"] = []
+        out = mcp_server.handle_tool("prepare_gov_web_search", {"analyze_result": {"features": [feat]}})
+        self.assertFalse(out.get("isError"))
+        body = out["structuredContent"]
+        self.assertEqual(body["candidate_count"], 1)
+        self.assertIn("search_plan", body["candidates"][0])
 
 
 class DataSourceTests(unittest.TestCase):

@@ -175,6 +175,26 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 
 **依赖**：MCP Server 需 `pip install -r requirements-mcp.txt`（含 `pyproj` 用于 CRS 重投影）。
 
+## 后续工具
+
+### `prepare_gov_web_search`
+
+在 `analyze_regions` 之后调用。输入参数：
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `analyze_result` | 是 | `analyze_regions` 的完整返回体 |
+
+返回（节选）：
+
+| 字段 | 说明 |
+|------|------|
+| `candidate_count` | 需政府 Web 检索的地物数（empty_only：已有 `project_evidence` 的跳过） |
+| `skipped_summary` | `has_project_evidence` / `no_admin` 跳过计数 |
+| `candidates[]` | 每项含 `index`、`admin`、`match_roads`、`search_plan.rounds[]` |
+
+**无网络**；Agent 按 [gov_web_search_guide.md](gov_web_search_guide.md) 分轮执行 `web_search`/`web_fetch`。
+
 ## 实现注记（当前行为，待进一步确认）
 
 ### MCP 协议版本

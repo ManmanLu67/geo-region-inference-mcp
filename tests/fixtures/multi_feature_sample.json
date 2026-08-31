@@ -1,0 +1,21 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"parcel_id": "test-a", "note": "synthetic fixture"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[120.01, 30.01], [120.011, 30.01], [120.011, 30.011], [120.01, 30.011], [120.01, 30.01]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"parcel_id": "test-b", "note": "synthetic fixture"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[120.02, 30.02], [120.021, 30.02], [120.021, 30.021], [120.02, 30.021], [120.02, 30.02]]]
+      }
+    }
+  ]
+}

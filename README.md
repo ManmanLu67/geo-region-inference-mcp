@@ -94,6 +94,8 @@ python script.py
     ↓
 analyze_regions
     ↓
+prepare_gov_web_search（可选）→ Agent 分轮 web 检索
+    ↓
 批量处理 + 并发查询 + 结果压缩
     ↓
 LLM 进行语义推理
@@ -115,9 +117,10 @@ geo-region-inference/
 ├── geo_input.py                     # GeoJSON 加载、CRS 重投影、Esri 误传检测
 ├── geo_geometry.py                  # MCP 权威几何统计
 ├── geo_clients.py                   # 坐标 / httpx / 高德百度 OSM
+├── gov_search.py                    # 政府 Web 检索计划（四轮 query，无网络）
 ├── validation.py                    # 输出 Schema 校验（MCP 与 CLI 共用）
 ├── mcp_config.example.json
-├── requirements-mcp.txt             # httpx + pyproj（CRS，非 GDAL）
+├── requirements-mcp.txt             # httpx + pyproj；含国内推荐 PyPI 镜像选项
 ├── tests/
 │   ├── test_offline.py
 │   └── fixtures/                    # 合成测试数据（无真实地块）
@@ -135,6 +138,7 @@ geo-region-inference/
 | 怎么装 MCP | `MCP_SETUP.md` |
 | 工具参数 / env / MCP 返回字段 | `references/mcp_evidence_schema.md` |
 | LLM 最终 JSON | `references/output_schema.md` |
+| 政府 Web 检索 SOP | `references/gov_web_search_guide.md` |
 | API Key | `references/map_api_setup.md` |
 
 `scripts/` **已废弃**，正常路径只用 MCP；见 [scripts/README.md](scripts/README.md)。
@@ -289,7 +293,13 @@ validate_result
 
 ### `validate_result`
 
-对最终语义结果执行结构和证据规则校验。
+对最终语义结果执行结构和证据规则校验（`related_projects` 必填 `evidence_type`；政府强证据须 `source_url`）。
+
+---
+
+### `prepare_gov_web_search`
+
+在 `analyze_regions` 之后调用。输入其完整返回体，输出**四轮**政府 Web 搜索计划（`search_plan.rounds`），仅包含尚无 `project_evidence` 且有区县级 admin 的地物。**无网络**；实际检索由 Agent 的 `web_search` / `web_fetch` 执行。见 [references/gov_web_search_guide.md](references/gov_web_search_guide.md)。
 
 ---
 
@@ -376,11 +386,19 @@ macOS / Linux：
 source .venv/bin/activate
 ```
 
-然后：
+然后（`requirements-mcp.txt` 已含清华 PyPI 镜像选项，国内可直接安装）：
 
 ```bash
 pip install -r requirements-mcp.txt
 ```
+
+若清华源超时，可临时换阿里云：
+
+```bash
+pip install -r requirements-mcp.txt --index-url https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+```
+
+也可将 [`pip.ini.example`](pip.ini.example) 复制到 `%APPDATA%\pip\pip.ini`（Windows）或 `~/.pip/pip.conf`（macOS/Linux），作为全局 pip 镜像配置。
 
 装好依赖后做离线测试：
 

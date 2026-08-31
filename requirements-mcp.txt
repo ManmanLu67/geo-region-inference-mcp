@@ -1,2 +1,8 @@
+# MCP runtime deps. Pip options below apply only when installing this file.
+# Tsinghua mirror (recommended for CN). Overseas: comment out the three -- lines.
+--index-url https://pypi.tuna.tsinghua.edu.cn/simple
+--trusted-host pypi.tuna.tsinghua.edu.cn
+--default-timeout 120
+
 httpx>=0.28,<0.29
 pyproj>=3.6,<4
