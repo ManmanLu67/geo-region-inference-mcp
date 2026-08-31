@@ -9,7 +9,7 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 ```jsonc
 {
   "server": "geo-region-inference",
-  "server_version": "2.3.0",
+  "server_version": "2.4.0",
   "feature_count": 2,
   "input_meta": {
     "source_path": "D:/项目/地块.geojson",
@@ -74,15 +74,19 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 - 多环 Polygon 的 `centroid` 为 **shoelace 面积加权质心**，不是简单顶点平均或 bbox 中心。
 - 输入坐标在 MCP 内统一为 **WGS84 (EPSG:4326)**；带 CRS 的 GeoJSON（如 EPSG:4509）会经 pyproj 自动重投影。
 
-### `data_source`
+### `data_source`（MCP feature 级）
 
-只统计 `status=ok` 的源：
+> **层级说明**：本字段为 MCP **feature 级**统计，仅反映 **map 源**（amap/baidu/osm）参与情况；`hybrid` = 两个及以上 map 源 `status=ok`；`offline` = 无 map 在线成功。
+>
+> LLM **最终**输出的顶层 `data_source` 语义更宽（含 gov/Web、场景 4 等），**写最终结果时以 [output_schema.md](output_schema.md) 为准**；可能与 MCP feature 级值不同。
+
+只统计 `status=ok` 的 map 源：
 
 | 值 | 含义 |
 |----|------|
-| `amap` / `baidu` / `osm` | 仅一个源成功 |
-| `hybrid` | 两个及以上源成功 |
-| `offline` | 无在线源成功，或 `search_projects` 与 `search_poi` 均为 false |
+| `amap` / `baidu` / `osm` | 仅一个 map 源成功 |
+| `hybrid` | 两个及以上 map 源成功 |
+| `offline` | 无 map 源成功，或 `search_projects` 与 `search_poi` 均为 false |
 
 ## `sources[]` 每条记录
 

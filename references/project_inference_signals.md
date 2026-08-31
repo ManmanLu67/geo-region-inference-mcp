@@ -43,52 +43,38 @@
 
 注意：`building=construction` 或 `construction=*` 说明处于建设状态，但**不等于具体项目名称已知**；只有名称、编号或其他直接证据同时出现时，才可提高具体项目名称的置信度。
 
-## 4. 区域类型和建筑作为间接证据
+## 4. 优先级与置信度 cap
 
-当没有直接项目名称时，可以使用：
-
-`region_type` → `possible_buildings` → 类型化项目描述
-
-例如：
-
-- `region_type=住宅小区` + `possible_buildings=住宅楼` → “住宅类建设项目，具体名称未知”；
-- `region_type=教育用地` + `possible_buildings=教学楼/宿舍` → “教育设施建设项目，具体名称未知”；
-- `region_type=工业园区/厂房` + `possible_buildings=厂房/仓库` → “工业园区建设项目，具体名称未知”。
-
-这类结论属于**间接推断**，即使区域类型和建筑判断置信度很高，`related_projects.confidence` 仍不应超过 0.4，除非补充了直接项目线索。
-
-## 5. 查询范围与项目证据补查
-
-基础半径首先按地块尺寸计算。若第一轮没有项目名称/编号/建设状态线索，可将半径放大到原值的 2–3 倍，并专门搜索：
-
-- 临近主干道或路口的项目 POI；
-- 地块边缘外的“项目/工地/建设”类 POI；
-- 反向地理编码的名称、地址和业务区域线索。
-
-扩大范围只用于补充证据，不能把“附近存在某项目”自动等同于“该项目就是该地块对应项目”。必须说明空间关系与证据强弱。
-
-## 6. 证据优先级
-
-建议按以下顺序理解证据强弱：
+建议按以下顺序理解证据强弱（前 3–4 类通常足以支持较高置信度的具体项目名）：
 
 1. 明确项目名称 + 项目编号/备案/规划信息；
 2. 明确项目名称 + “在建/建设中/工程”等状态信息；
 3. 属性字段直接给出项目名称或项目编号；
 4. POI 名称直接包含项目语义，但缺少编号/公示核验；
 5. OSM 建设状态 + 邻近命名对象；
-6. `region_type` + `possible_buildings` 推导出的类型化项目描述；
+6. `region_type` + `possible_buildings` 推导出的类型化项目描述（**间接推断**，即使区域类型判断很高，**`related_projects.confidence` 仍 ≤0.4**，除非补充直接项目线索）；
 7. 仅凭几何形状联想项目类型。
 
-只有前 3–4 类直接项目线索通常足以支持具体项目名称的较高置信度。后续类别应明确标注为间接推断。
+`evidence_type` 与各类型 confidence 上限见 [output_schema.md](output_schema.md#evidence_type-与置信度上限)；校验由 `validate_result` 强制执行。
 
-## 7. 政府公示信息
+## 5. 查询范围与项目证据补查
+
+基础半径首先按地块尺寸计算。若第一轮没有项目名称/编号/建设状态线索，MCP 可将半径放大到原值的 **2.5×**（上限 5000m），并专门搜索：
+
+- 临近主干道或路口的项目 POI；
+- 地块边缘外的“项目/工地/建设”类 POI；
+- 反向地理编码的名称、地址和业务区域线索。
+
+扩大范围只用于补充证据，不能把“附近存在某项目”自动等同于“该项目就是该地块对应项目”。必须说明空间关系与证据强弱。细节见 [mcp_evidence_schema.md](mcp_evidence_schema.md) 扩圈字段。
+
+## 6. 政府公示信息
 
 Skill 默认地图源为高德、百度、OSM/Overpass；**政府公示 Web 检索**在 `analyze_regions` 之后由 Agent 执行（MCP `prepare_gov_web_search` 生成四轮搜索计划，Agent 用 `web_search`/`web_fetch` 检索 `.gov.cn`）。
 
-流程见 [gov_web_search_guide.md](gov_web_search_guide.md)。**未完成第三步检索前**，不要写 `evidence_type: gov_publicity` 或假装已核验政府公示。
+流程见 [gov_web_search_guide.md](gov_web_search_guide.md)。**未完成 SKILL 第三步 gov Web 检索前**，不要写 `evidence_type: gov_publicity` 或假装已核验政府公示。
 
 政府 Web 强证据应优先提取：项目名称、建设单位、项目/备案/规划编号、地块编号、地址、公示日期；写入 `related_projects` 时用 `evidence_type: gov_publicity`（strong 匹配，须 `source_url`）或 `gov_publicity_weak`（仅同区活动，≤0.3）。
 
-政府 Web 证据与 map 源共同支撑结论时，顶层 `data_source` 仍描述 map 参与情况；gov 侧通过 `evidence_type` 体现（见 output_schema hybrid 第 3 种场景）。
+写**最终**结果时顶层 `data_source` 按 [output_schema.md](output_schema.md#data_source-与-hybrid)（含 map+gov 场景 3、无 map+Web 场景 4）；MCP feature 级 map 统计见 [mcp_evidence_schema.md](mcp_evidence_schema.md#data_sourcemcp-feature-级)。
 
-**无 map 源时**：若属性/用户说明中有地址、编号、项目名等可检索线索，Agent 仍应做 Web 检索（`prepare_gov_web_search` 无 admin 时可自行组 query）；项目结论由 Web 证据支撑时，`data_source` 用 **`hybrid`（第 4 种：无 map + 输入线索 Web）**，勿误标为已有 map 核验。
+**无 map 源时**：若属性/用户说明中有地址、编号、项目名等可检索线索，Agent 仍应做 Web 检索（`prepare_gov_web_search` 无 admin 时可自行组 query）；项目结论由 Web 证据支撑时，最终 `data_source` 用 **`hybrid`（场景 4：无 map + 输入线索 Web）**。

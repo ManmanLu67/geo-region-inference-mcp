@@ -64,6 +64,8 @@
 
 ## `data_source` 与 `hybrid`
 
+> **层级说明**：MCP `analyze_regions` 返回的 feature 级 `data_source` 仅统计 map 源（见 [mcp_evidence_schema.md](mcp_evidence_schema.md)）；**与本节 LLM 最终输出的顶层 `data_source` 可能不同**——写最终结果时**以本节为准**。
+
 `data_source` 描述 **amap / baidu / osm / offline / hybrid** 中地图与 MCP 在线 API 的参与情况。`hybrid` 表示以下**任一**（在 evidence 中说明具体哪种）：
 
 1. **多地图源**：两个及以上 map 源（amap/baidu/osm）均 `status=ok` 并参与结论；

@@ -45,8 +45,9 @@ MCP 返回的 OSM source（或 CLI 脚本 stdout）中，以下字段重要性�
 如果 OSM source 的上述字段全部为空，或 `status=empty`，说明该区域 OSM 数据覆盖不足（常见于新建区域、农村地区），此时：
 
 - 不要把「OSM 无数据」当作「这里没有建筑/是空地」的证据
-- 看 `evidence.data_source`：若所有在线源均不可用/为空，则为 `offline`
-- 转为依赖 MCP 返回的 `geometry` 形状特征（或离线时用 `calculate_geometry` / 几何字段）和 `properties` 做弱证据推理
+- MCP feature 级 `data_source` 可能为 `offline`（无 map 在线成功）；若 Agent 用**输入线索 + Web 检索**（含政府公示）支撑 `related_projects`，**最终**顶层 `data_source` 仍用 `hybrid`（场景 4，见 [output_schema.md](output_schema.md)）
+- **仅**几何/属性弱推断、无 Web 检索支撑项目结论时，最终 `data_source` 用 `offline`
+- 转为依赖 MCP 返回的几何形状特征（或 `calculate_geometry`）和 `properties` 做弱证据推理
 - `region_type`/`possible_buildings`/`related_projects` 里对应给出较低置信度（建议不超过 0.4），并在 evidence 里写明「OSM 无覆盖数据，基于几何形状推测」
 
 ## 失败与降级

@@ -4,7 +4,7 @@
 
 前置工具：MCP **`prepare_gov_web_search`**（仅生成四轮搜索计划，无网络）。
 
-流程总览见 [SKILL.md](../SKILL.md) 第三步；输出 schema 见 [output_schema.md](output_schema.md) 的 `evidence_type` / `source_url`。
+流程总览见 [SKILL.md](../SKILL.md) 第三步；`evidence_type` / `source_url` 见 [output_schema.md](output_schema.md#evidence_type-与置信度上限)。
 
 ## 1. 触发与跳过
 
@@ -56,16 +56,16 @@ candidate_count > 0 → 对每个 candidate 按轮检索
 4. **本轮有 gov 链接** → `web_fetch`（每地物最多 `max_fetch_per_feature`，默认 4）→ 做地址/道路匹配：
    - **strong**：公示道路/地名与 `match_roads` 或地块地址可对应 → 记录证据；若 `stop_on_confirmed_match` 为 true → **停止后续轮次**。
    - **weak**：仅确认同区有建设活动、无法对应本地块 → 记录 weak；可继续下一轮找更强证据。
-5. **四轮均完成且从未出现 gov 域名**（或仅有 weak 且无 strong）→ 第三步结束；第四步用 map/几何做 `inferred`，**不得虚构 gov 证据**。
+5. **四轮均完成且从未出现 gov 域名**（或仅有 weak 且无 strong）→ 本指南检索阶段结束；进入 **SKILL 第四步**语义推理，用 map/几何做 `inferred`，**不得虚构 gov 证据**。
 
 ## 3. Agent 操作要点
 
 - **优先**点击 `.gov.cn` 结果；非 gov 站点仅作线索，不得当作政府公示直接证据。
 - **不要**把同一篇公示里列出的所有项目都收进 `related_projects`；必须做**地址关键词匹配**筛选。
 - **版权**：禁止整段摘抄公示原文；项目正式名称可短引一次；其余转述；每个 `source_url` 仅引一次。
-- evidence 写**摘要**；URL 写入结构化字段 `source_url`（见 output_schema）。
+- evidence 写**摘要**；URL 写入结构化字段 `source_url`（见 [output_schema.md](output_schema.md#evidence_type-与置信度上限)）。
 
-### 第三步中间产物（传给第四步）
+### gov 检索中间产物（供 SKILL 第四～五步）
 
 ```jsonc
 {
@@ -82,23 +82,13 @@ candidate_count > 0 → 对每个 candidate 按轮检索
 }
 ```
 
-第四步写 `related_projects` 时据此填写 `evidence_type`、`source_url`、`publicity_date`。
+写入 `related_projects` 时据此填写 `evidence_type`、`source_url`、`publicity_date`（类型与置信度上限见 [output_schema.md](output_schema.md#evidence_type-与置信度上限)）。Round 3 区级公示默认倾向 **weak**，除非道路交叉匹配明确。
 
-## 4. evidence_type 与置信度
+## 4. 宿主能力
 
-| 匹配结果 | evidence_type | confidence |
-|----------|---------------|------------|
-| strong 地址/道路对应 | `gov_publicity` | 可 >0.6；**须** `source_url` |
-| 仅同区笼统、无法对应地块 | `gov_publicity_weak` | **≤0.3** |
-| 四轮均无 gov 强证据 | `inferred` | **≤0.4**；须 `supported_by` |
+需要 Agent 具备 **`web_search`** 与 **`web_fetch`**（如 Cursor 内置或 agent-reach）。不可用则跳过 SKILL 第三步，在 evidence 中说明未做政府 Web 检索。
 
-Round 3 区级公示默认倾向 **weak**，除非道路交叉匹配明确。
-
-## 5. 宿主能力
-
-需要 Agent 具备 **`web_search`** 与 **`web_fetch`**（如 Cursor 内置或 agent-reach）。不可用则跳过第三步，在 evidence 中说明未做政府 Web 检索。
-
-## 6. 限制
+## 5. 限制
 
 - 分轮不能覆盖所有政府措辞，但比固定 4+2 模板更接近「穷尽合理表达」。
 - 搜索引擎对区县级子站收录不全，仍可能漏检。

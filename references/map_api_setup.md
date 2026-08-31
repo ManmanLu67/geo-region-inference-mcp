@@ -1,6 +1,6 @@
 # 地图 API 数据源配置说明
 
-MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 fallback）。`data_source` 只统计 `status=ok` 的源：单源用 `amap`/`baidu`/`osm`，多源用 `hybrid`，都没有则 `offline`。`scripts/query_*.py` 仅用于本地调试。
+MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 fallback）。最终 `data_source` 见 [output_schema.md](output_schema.md)：单源 map 用 `amap`/`baidu`/`osm`，多源或 map+Web/离线组合用 `hybrid`；**仅**几何且无 Web 检索支撑项目结论时用 `offline`。无 map 源但输入属性线索 + Agent Web 检索支撑结论 → `hybrid`（场景 4）。`scripts/query_*.py` 已废弃，仅本地调试。
 
 | 数据源 | 是否需要 Key | 国内覆盖 | 说明 |
 |---|---|---|---|
@@ -38,9 +38,7 @@ MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 f
 
 ## MCP 查询行为
 
-对每个地物：高德、百度、OSM **同时**请求。OSM 在 `analyze_regions` 里按最多 10 个质心合并为一次 Overpass，不要按地块各打一次。
-
-若没有直接项目证据，最多再扩圈一次（仍每源一条记录，用 `expanded_radius_m` 表示，不会出现两个 `amap`）。
+对每个地物：高德、百度、OSM **并发**请求；无直接项目证据时最多扩圈一次（**2.5×**，上限 5000m）；OSM 按最多 10 个质心合并为一次 Overpass。参数、扩圈与 `sources[]` 字段见 [mcp_evidence_schema.md](mcp_evidence_schema.md)。
 
 来源冲突时把两边都写进 `evidence`，不要只留一个。
 
@@ -48,7 +46,7 @@ MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 f
 
 - 高德用 GCJ-02，百度用 BD-09，OSM/Overpass 用标准 WGS84
 - 转换在 `geo_clients.py` 内完成；传入 ArcGIS 导出的 WGS84 即可
-- 单独测试：
+- **已废弃**：`scripts/coord_transform.py` 仅本地调试（见 [scripts/README.md](../scripts/README.md)）。坐标转换已在 `geo_clients.py` / MCP 内完成。
   ```bash
   python scripts/coord_transform.py wgs84_to_gcj02 <lon> <lat>
   python scripts/coord_transform.py wgs84_to_bd09 <lon> <lat>
