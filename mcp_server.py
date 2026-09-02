@@ -34,13 +34,14 @@ from geo_geometry import feature_list, geometry_stats, radius_from_stats
 from geo_input import (
     build_geometry_invalid_alerts,
     normalize_geo_input,
+    scan_residual_esri_geometry,
     validate_geometry_fail_fast,
 )
 from gov_search import prepare_gov_web_search
 from validation import schema_data_source, validate_payload
 
 SERVER_NAME = "geo-region-inference"
-SERVER_VERSION = "2.5.0"
+SERVER_VERSION = "2.5.1"
 
 _CHANNEL_RANK = {"ok": 4, "empty": 3, "error": 2, "unavailable": 1}
 MAX_FEATURES = 80
@@ -229,8 +230,11 @@ def analyze_regions(
     if len(feats) > MAX_FEATURES:
         raise ValueError(f"feature_count {len(feats)} exceeds limit {MAX_FEATURES}")
     stats = [geometry_stats(f, i) for i, f in enumerate(feats)]
-    validate_geometry_fail_fast(stats, len(feats))
-    input_alerts.extend(build_geometry_invalid_alerts(stats, len(feats)))
+    structure_reasons = scan_residual_esri_geometry(feats)
+    validate_geometry_fail_fast(stats, len(feats), structure_reasons=structure_reasons)
+    input_alerts.extend(
+        build_geometry_invalid_alerts(stats, len(feats), structure_reasons=structure_reasons)
+    )
     jobs: list[tuple[int, float, float, float]] = []
     for s in stats:
         if "centroid" not in s:

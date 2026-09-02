@@ -19,7 +19,7 @@ MCP 返回的结构化错误分两类：**`sources[].reason_code`**（在线 API
 | code | severity | 含义 | Agent 处理 |
 |------|----------|------|------------|
 | `CRS_ASSUMED` | warning | 未声明 CRS，假定 WGS84 | **必须**提醒用户确认位置 |
-| `GEOMETRY_INVALID` | warning/error | 部分或全部地物几何无效 | **必须**列出 `invalid_indices`；不得当作全量成功 |
+| `GEOMETRY_INVALID` | warning/error | 部分或全部地物几何无效 | **必须**列出 `invalid_indices`；若有 `invalid_reasons` 一并说明；不得当作全量成功 |
 | `GEOMETRY_SIMPLIFIED` | warning | Esri 转换丢洞/简化 | **必须**列出 `feature_indices`；说明面积可能偏大 |
 
 ## `online_summary` 限流字段
@@ -28,7 +28,7 @@ MCP 返回的结构化错误分两类：**`sources[].reason_code`**（在线 API
 |------|------|
 | `rate_limit.{source}.feature_count` | 该源遭遇限流的地物数 |
 | `rate_limit.{source}.feature_ratio` | 限流地物占比 |
-| `batch_retry_recommended` | 当任一路源 `feature_ratio >= RATE_LIMIT_BATCH_RATIO`（默认 0.25）为 true |
+| `batch_retry_recommended` | 当任一路源 `feature_ratio >= RATE_LIMIT_BATCH_RATIO`（默认 0.10）为 true |
 | `retry_after_hint_ms` | 客户端估算退避等待 |
 
 ## 环境变量（限流 / 几何）
@@ -40,7 +40,14 @@ MCP 返回的结构化错误分两类：**`sources[].reason_code`**（在线 API
 | `AMAP_BATCH_DELAY_MS` | 2000 | 批间间隔 |
 | `AMAP_RETRY_MAX` | 3 | 退避重试次数 |
 | `GEOMETRY_FAIL_RATIO` | 0.5 | 无效几何占比 ≥ 此值则 hard fail |
-| `RATE_LIMIT_BATCH_RATIO` | 0.25 | 触发 `batch_retry_recommended` |
+| `RATE_LIMIT_BATCH_RATIO` | 0.10 | 触发 `batch_retry_recommended` |
+
+### `GEOMETRY_INVALID.invalid_reasons`
+
+| reason | 含义 |
+|--------|------|
+| `residual_esri_keys` | normalize 后 geometry 仍含 `rings`/`paths` 等 Esri 键（含与 coordinates 并存的混合畸形） |
+| `geometry_stat_failed` | 质心/面积等几何统计失败（空坐标、无效 Polygon 等） |
 
 ## `check_api_status`
 

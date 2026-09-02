@@ -54,7 +54,7 @@ Set keys in the MCP host `env` block. Do not put keys into `SKILL.md` or commit 
 
 Common variables: `AMAP_KEY`, `BAIDU_AK`, `OSM_ENABLED`, `OVERPASS_URL`, `HTTP_TIMEOUT_SECONDS`.
 
-Rate limiting / geometry defaults (v2.5+): `AMAP_QPS_LIMIT=3`, `AMAP_BATCH_SIZE=5`, `AMAP_BATCH_DELAY_MS=2000`, `GEOMETRY_FAIL_RATIO=0.5`, `RATE_LIMIT_BATCH_RATIO=0.25`. See [references/error_codes.md](references/error_codes.md).
+Rate limiting / geometry defaults (v2.5+): `AMAP_QPS_LIMIT=3`, `AMAP_BATCH_SIZE=5`, `AMAP_BATCH_DELAY_MS=2000`, `GEOMETRY_FAIL_RATIO=0.5`, `RATE_LIMIT_BATCH_RATIO=0.10`. See [references/error_codes.md](references/error_codes.md).
 
 **Full env table** (including `GEO_INPUT_*`): [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md#相关环境变量).
 

@@ -51,7 +51,7 @@ validate_result
 
 **向用户汇报前必读**：
 - `input_alerts` 含 `CRS_ASSUMED` → 提醒用户确认位置（文件未声明坐标系，已假定 WGS84）
-- `input_alerts` 含 **`GEOMETRY_INVALID`** → **必须**列出 `invalid_indices`，说明这些地物结果不完整，**不得**当作全量成功
+- `input_alerts` 含 **`GEOMETRY_INVALID`** → **必须**列出 `invalid_indices`（及 `invalid_reasons` 若存在），说明这些地物结果不完整，**不得**当作全量成功；`invalid_reasons` 含 `residual_esri_keys` 时提示 ArcGIS 导出标准 GeoJSON
 - `input_alerts` 含 **`GEOMETRY_SIMPLIFIED`** → **必须**列出 `feature_indices`，说明 Esri 转换可能使面积/形状偏大
 - `online_summary.all_channels_unavailable=true` → 说明在线源不可用（缺 Key/网络），**不是**「此地无项目」
 - `online_summary.batch_retry_recommended=true` → **必须**建议拆分重跑（≤5 地物/批）或调低 `AMAP_QPS_LIMIT`；见 [error_codes.md](references/error_codes.md)

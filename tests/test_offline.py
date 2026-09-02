@@ -160,6 +160,41 @@ class GeoInputTests(unittest.TestCase):
         alert = next(a for a in out["input_alerts"] if a["code"] == "GEOMETRY_INVALID")
         self.assertEqual(alert["severity"], "warning")
         self.assertIn(3, alert["invalid_indices"])
+        self.assertEqual(alert.get("invalid_reasons", {}).get("3"), "geometry_stat_failed")
+
+    def test_residual_esri_keys_hybrid_geometry(self):
+        path = os.path.join(self.FIXTURES, "esri_hybrid_paths_with_coordinates.json")
+        fc, _meta = geo_input.normalize_geo_input(input_path=path)
+        from geo_geometry import feature_list
+
+        feats = feature_list(fc)
+        reasons = geo_input.scan_residual_esri_geometry(feats)
+        stats = [mcp_server.geometry_stats(f, i) for i, f in enumerate(feats)]
+        alerts = geo_input.build_geometry_invalid_alerts(stats, len(feats), structure_reasons=reasons)
+        alert = next(a for a in alerts if a["code"] == "GEOMETRY_INVALID")
+        self.assertIn(0, alert["invalid_indices"])
+        self.assertEqual(alert["invalid_reasons"]["0"], "residual_esri_keys")
+        self.assertIn("Esri", alert["user_message"])
+        hybrid = json.loads(open(path, encoding="utf-8").read())["features"][0]
+        fc_multi = {"type": "FeatureCollection", "features": [json.loads(json.dumps(SQUARE))] * 3 + [hybrid]}
+        with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "0.5"}):
+            out = mcp_server.analyze_regions(geojson=fc_multi, search_projects=False, search_poi=False)
+        alert2 = next(a for a in out["input_alerts"] if a["code"] == "GEOMETRY_INVALID")
+        self.assertIn(3, alert2["invalid_indices"])
+        self.assertEqual(alert2["invalid_reasons"]["3"], "residual_esri_keys")
+
+    def test_scan_residual_esri_geometry_unit(self):
+        feats = [{
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]],
+                "paths": [[[0, 0], [1, 1]]],
+            },
+            "properties": {},
+        }]
+        reasons = geo_input.scan_residual_esri_geometry(feats)
+        self.assertEqual(reasons, {0: "residual_esri_keys"})
 
     def test_geometry_fail_fast_half_invalid(self):
         good = json.loads(json.dumps(SQUARE))
@@ -581,13 +616,14 @@ class OsmEnabledTests(unittest.TestCase):
 
 
 class RateLimitSummaryTests(unittest.TestCase):
-    def test_batch_retry_recommended(self):
+    def test_batch_retry_recommended_at_threshold(self):
         features = []
-        for i in range(4):
+        for i in range(10):
+            amap = {"source": "amap", "status": "error", "reason_code": "RATE_LIMIT", "reason": "CUQPS"} if i == 0 else {"source": "amap", "status": "empty"}
             features.append({
                 "index": i,
                 "sources": [
-                    {"source": "amap", "status": "error", "reason_code": "RATE_LIMIT", "reason": "CUQPS"},
+                    amap,
                     {"source": "baidu", "status": "empty"},
                     {"source": "osm", "status": "empty"},
                 ],
@@ -595,6 +631,19 @@ class RateLimitSummaryTests(unittest.TestCase):
         summary = mcp_server.summarize_online_channels(features)
         self.assertTrue(summary["batch_retry_recommended"])
         self.assertIn("rate_limit", summary)
+        self.assertAlmostEqual(summary["rate_limit"]["amap"]["feature_ratio"], 0.1)
+
+    def test_batch_retry_not_recommended_below_threshold(self):
+        features = []
+        for i in range(10):
+            amap = {"source": "amap", "status": "error", "reason_code": "RATE_LIMIT", "reason": "CUQPS"} if i == 0 else {"source": "amap", "status": "empty"}
+            features.append({
+                "index": i,
+                "sources": [amap, {"source": "baidu", "status": "empty"}, {"source": "osm", "status": "empty"}],
+            })
+        with mock.patch.object(mcp_server, "RATE_LIMIT_BATCH_RATIO", 0.15):
+            summary = mcp_server.summarize_online_channels(features)
+        self.assertFalse(summary["batch_retry_recommended"])
 
 
 class CheckApiStatusTests(unittest.TestCase):

@@ -31,7 +31,7 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 
 - **`input_alerts`**：Agent **必须**向用户转述（与 `online_summary.warnings` 同级）。常见 code：
   - `CRS_ASSUMED`：未声明 CRS，已假定 WGS84
-  - `GEOMETRY_INVALID`：部分/全部地物几何无效；**必须**列出 `invalid_indices`
+  - `GEOMETRY_INVALID`：部分/全部地物几何无效；**必须**列出 `invalid_indices`；可选 `invalid_reasons`（`residual_esri_keys` / `geometry_stat_failed`）
   - `GEOMETRY_SIMPLIFIED`：Esri 转换简化（如丢洞）；**必须**列出 `feature_indices`
   - 完整表见 [error_codes.md](error_codes.md)
 - **`online_summary`**：仅当 `search_projects` 或 `search_poi` 为 true 时出现。`all_channels_unavailable=true` 表示三通道均无 `ok`/`empty`，**不是**「无项目」。
@@ -183,7 +183,7 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 | `AMAP_BATCH_DELAY_MS` | 批间间隔 ms（默认 **2000**） |
 | `AMAP_RETRY_MAX` | 高德退避重试次数（默认 3） |
 | `GEOMETRY_FAIL_RATIO` | 无效几何占比 ≥ 此值 hard fail（默认 **0.5**） |
-| `RATE_LIMIT_BATCH_RATIO` | 限流占比 ≥ 此值时 `batch_retry_recommended`（默认 **0.25**） |
+| `RATE_LIMIT_BATCH_RATIO` | 限流占比 ≥ 此值时 `batch_retry_recommended`（默认 **0.10**） |
 | `PROJECT_KEYWORDS` | 项目 POI 关键词（默认 `在建\|项目\|工地\|建设`） |
 
 错误码与告警见 [error_codes.md](error_codes.md)。

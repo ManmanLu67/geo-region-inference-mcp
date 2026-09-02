@@ -417,6 +417,52 @@ def build_input_alerts(crs_meta: dict[str, Any], *, esri_meta: EsriConvertMeta |
     return alerts
 
 
+def _geometry_has_residual_esri_keys(geom: dict[str, Any] | None) -> bool:
+    if not isinstance(geom, dict):
+        return False
+    if "rings" in geom or "paths" in geom:
+        return True
+    if "x" in geom and "y" in geom and not _has_valid_geojson_coordinates(geom):
+        return True
+    return False
+
+
+def scan_residual_esri_geometry(features: list[dict[str, Any]]) -> dict[int, str]:
+    """Post-normalize scan: geometry still contains unconverted Esri keys."""
+    out: dict[int, str] = {}
+    for idx, feat in enumerate(features):
+        if not isinstance(feat, dict):
+            continue
+        geom = feat.get("geometry")
+        if _geometry_has_residual_esri_keys(geom if isinstance(geom, dict) else None):
+            out[idx] = "residual_esri_keys"
+    return out
+
+
+def merged_invalid_indices(
+    stats: list[dict[str, Any]],
+    structure_reasons: dict[int, str] | None = None,
+) -> list[int]:
+    reasons = structure_reasons or {}
+    indices: set[int] = set(reasons.keys())
+    for s in stats:
+        if is_geometry_stat_invalid(s):
+            indices.add(s["index"])
+    return sorted(indices)
+
+
+def merged_invalid_reasons(
+    stats: list[dict[str, Any]],
+    structure_reasons: dict[int, str] | None = None,
+) -> dict[int, str]:
+    reasons: dict[int, str] = dict(structure_reasons or {})
+    for s in stats:
+        idx = s["index"]
+        if is_geometry_stat_invalid(s) and idx not in reasons:
+            reasons[idx] = "geometry_stat_failed"
+    return reasons
+
+
 def is_geometry_stat_invalid(stat: dict[str, Any]) -> bool:
     if stat.get("error"):
         return True
@@ -428,28 +474,55 @@ def is_geometry_stat_invalid(stat: dict[str, Any]) -> bool:
     return False
 
 
-def build_geometry_invalid_alerts(stats: list[dict[str, Any]], feature_count: int) -> list[dict[str, Any]]:
-    invalid_indices = [s["index"] for s in stats if is_geometry_stat_invalid(s)]
+def _geometry_invalid_user_message(
+    invalid_count: int,
+    feature_count: int,
+    invalid_reasons: dict[int, str],
+) -> str:
+    esri_indices = sorted(i for i, r in invalid_reasons.items() if r == "residual_esri_keys")
+    base = (
+        f"{invalid_count}/{feature_count} 个地物几何无效或无法计算面积/质心，"
+        "这些地物结果不完整；请检查 GeoJSON/Esri 格式。"
+    )
+    if esri_indices:
+        idx_text = "、".join(str(i) for i in esri_indices)
+        base += f" 地物 {idx_text} 含未转换的 Esri 几何键(rings/paths)；建议 ArcGIS 导出标准 GeoJSON。"
+    return base
+
+
+def build_geometry_invalid_alerts(
+    stats: list[dict[str, Any]],
+    feature_count: int,
+    *,
+    structure_reasons: dict[int, str] | None = None,
+) -> list[dict[str, Any]]:
+    invalid_indices = merged_invalid_indices(stats, structure_reasons)
     if not invalid_indices:
         return []
+    invalid_reasons = merged_invalid_reasons(stats, structure_reasons)
     invalid_count = len(invalid_indices)
     severity = "error" if invalid_count >= feature_count else "warning"
-    return [{
+    alert: dict[str, Any] = {
         "code": "GEOMETRY_INVALID",
         "severity": severity,
         "invalid_count": invalid_count,
         "invalid_indices": invalid_indices,
-        "user_message": (
-            f"{invalid_count}/{feature_count} 个地物几何无效或无法计算面积/质心，"
-            "这些地物结果不完整；请检查 GeoJSON/Esri 格式。"
-        ),
-    }]
+        "user_message": _geometry_invalid_user_message(invalid_count, feature_count, invalid_reasons),
+    }
+    if invalid_reasons:
+        alert["invalid_reasons"] = {str(k): v for k, v in sorted(invalid_reasons.items())}
+    return [alert]
 
 
-def validate_geometry_fail_fast(stats: list[dict[str, Any]], feature_count: int) -> None:
+def validate_geometry_fail_fast(
+    stats: list[dict[str, Any]],
+    feature_count: int,
+    *,
+    structure_reasons: dict[int, str] | None = None,
+) -> None:
     if feature_count <= 0:
         return
-    invalid_count = sum(1 for s in stats if is_geometry_stat_invalid(s))
+    invalid_count = len(merged_invalid_indices(stats, structure_reasons))
     if invalid_count <= 0:
         return
     ratio = invalid_count / feature_count
