@@ -40,7 +40,9 @@ validate_result
 不假设固定字段名——属性表可能几乎为空，也可能有专业代码字段。先识别地物数量和字段结构；
 若输入明显只有一个地物且字段一目了然，可直接处理。
 
-- **ArcGIS 用户**：优先导出标准 GeoJSON；若误传 Esri REST JSON（`rings`/`attributes`），MCP **v2.5+** 会尝试自动转换，有损时发 `GEOMETRY_SIMPLIFIED` 告警；无法转换时提示重新导出。
+- **ArcGIS 用户**：图层导出为 GeoJSON，坐标系优先选 WGS84（EPSG:4326）；其他坐标系（如
+  CGCS2000）也可直接导出保留 CRS 信息，MCP 会自动重投影到 WGS84。**不要**传 Esri REST
+  JSON（含 `rings`/`attributes`）——误传会被 MCP 拦截并提示重新导出。
 - **大文件/顶点多**：用 `input_path` 指向本地文件，不要把整份 JSON 贴进对话。
 - **SHP 输入**：先由宿主/文件工具转换为 GeoJSON，不要让 MCP 自己加载 GDAL/Fiona/
   GeoPandas；若宿主无法转换，如实告知这是输入层限制，不要在 Skill 里重新实现 GIS 解析栈。
@@ -51,21 +53,17 @@ validate_result
 
 **向用户汇报前必读**：
 - `input_alerts` 含 `CRS_ASSUMED` → 提醒用户确认位置（文件未声明坐标系，已假定 WGS84）
-- `input_alerts` 含 **`GEOMETRY_INVALID`** → **必须**列出 `invalid_indices`，说明这些地物结果不完整，**不得**当作全量成功
-- `input_alerts` 含 **`GEOMETRY_SIMPLIFIED`** → **必须**列出 `feature_indices`，说明 Esri 转换可能使面积/形状偏大
-- `online_summary.all_channels_unavailable=true` → 说明在线源不可用（缺 Key/网络），**不是**「此地无项目」
-- `online_summary.batch_retry_recommended=true` → **必须**建议拆分重跑（≤5 地物/批）或调低 `AMAP_QPS_LIMIT`；见 [error_codes.md](references/error_codes.md)
+- `online_summary.all_channels_unavailable=true` → 说明在线源不可用（缺 Key/网络），
+  **不是**「此地无项目」
 
 **flag 语义**：`search_projects=true`（默认）已用项目关键词检索 POI，`search_poi`
 **不会**叠加第二套泛搜；`search_poi=false` 关不掉项目检索；两者都 `false` 时不访问任何
 在线源。
 
 该工具一次性完成：几何统计（质心/面积/紧凑度/长宽比）→ 按地块尺寸生成初始半径 →
-高德/百度/OSM 并发查询（项目关键词优先；**默认 QPS≈3、批大小 5、批间 2s**）→ 无直接项目证据时扩大半径补查一次（**2.5×**）
+高德/百度/OSM 并发查询（项目关键词优先）→ 无直接项目证据时扩大半径补查一次（≈2–2.5×）
 → 结果预过滤压缩。**扩大范围查到的普通 POI 不能直接当作目标地块本身的证据。** 字段定义
 见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)。
-
-大批量（如 >10 地物）前可调用 **`check_api_status(probe_mode=burst)`** 诊断 CUQPS；`single` 模式仅验活 Key。
 
 **数据源配置**：高德需 `AMAP_KEY`，百度需 `BAIDU_AK`，OSM 免 Key 但受公共服务限流影响
 （`OVERPASS_URL` 可指向备用实例，沙箱拦截时设 `OSM_ENABLED=false` 整体跳过）。见
@@ -74,7 +72,7 @@ validate_result
 **status 处理**（不要盲目重试）：
 - `unavailable`（无 Key / 被 `OSM_ENABLED=false` 关闭）→ 不重试
 - `error` + `reason_code=INVALID_API_KEY` → 本次任务永久跳过该源
-- `error` + `RATE_LIMIT`/`TIMEOUT` → 服务端已退避；若 `batch_retry_recommended` 仍 true，建议分批重跑
+- `error` + `RATE_LIMIT`/`TIMEOUT` → 可换源，不要空转重试同一 Key
 - `empty` → 接口成功但附近无结果，属正常情况
 
 多个来源明显矛盾时，不要只选「看起来更像」的一个，将冲突保留进 evidence。
@@ -131,10 +129,8 @@ validate_result
 严格按 [references/output_schema.md](references/output_schema.md) 组织结果，展示顺序固定为：
 **项目结论 → 项目直接证据 → 区域类型/建筑（推理依据）**。
 
-完成后对每个地物各调一次 `validate_result({"result": <单个对象>})`；失败按返回的 `errors` 修正后重试。不要执行
+完成后调用 `validate_result`；失败按返回的 `errors` 修正后重试。不要执行
 `python scripts/validate_output.py`（已废弃）。
-
-扬尘源台账等属性线索（如 `BH`/`SGQK`/`XZMC`/`Area`）见 [project_inference_signals.md](references/project_inference_signals.md)。
 
 ## 第六步：呈现给用户
 

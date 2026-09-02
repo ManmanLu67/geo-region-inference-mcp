@@ -54,8 +54,6 @@ Set keys in the MCP host `env` block. Do not put keys into `SKILL.md` or commit 
 
 Common variables: `AMAP_KEY`, `BAIDU_AK`, `OSM_ENABLED`, `OVERPASS_URL`, `HTTP_TIMEOUT_SECONDS`.
 
-Rate limiting / geometry defaults (v2.5+): `AMAP_QPS_LIMIT=3`, `AMAP_BATCH_SIZE=5`, `AMAP_BATCH_DELAY_MS=2000`, `GEOMETRY_FAIL_RATIO=0.5`, `RATE_LIMIT_BATCH_RATIO=0.25`. See [references/error_codes.md](references/error_codes.md).
-
 **Full env table** (including `GEO_INPUT_*`): [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md#相关环境变量).
 
 Key signup steps: [references/map_api_setup.md](references/map_api_setup.md).
@@ -69,7 +67,6 @@ Key signup steps: [references/map_api_setup.md](references/map_api_setup.md).
 | `validate_result` | Validate final JSON (`evidence_type`, caps) | [references/output_schema.md](references/output_schema.md) |
 | `calculate_geometry` | Offline geometry only (debug) | [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md) |
 | `search_project_evidence` | Single-point project search (debug) | [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md) |
-| `check_api_status` | Probe API keys; burst mode for CUQPS | [references/error_codes.md](references/error_codes.md) |
 
 If both `search_projects` and `search_poi` are false, no online APIs are called.
 

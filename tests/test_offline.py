@@ -104,70 +104,22 @@ class GeometryTests(unittest.TestCase):
 class GeoInputTests(unittest.TestCase):
     FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 
-    def test_esri_nested_features_converted(self):
+    def test_esri_nested_features_rejected(self):
         payload = {
             "features": [{
                 "attributes": {"id": 1},
-                "geometry": {"rings": [[[116.39, 39.91], [116.40, 39.91], [116.40, 39.92], [116.39, 39.92], [116.39, 39.91]]]},
-            }],
-            "spatialReference": {"wkid": 4326},
+                "geometry": {"rings": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+            }]
         }
-        fc, meta = geo_input.normalize_geo_input(geojson=payload)
-        stats = mcp_server.geometry_stats(fc["features"][0], 0)
-        self.assertNotIn("error", stats)
-        self.assertGreater(stats.get("area_m2") or 0, 0)
-        self.assertTrue(meta.get("esri_converted"))
+        with self.assertRaises(ValueError) as ctx:
+            geo_input.load_geo_input(geojson=payload)
+        self.assertIn("GeoJSON", str(ctx.exception))
 
-    def test_esri_top_level_rings_converted(self):
-        payload = {
-            "attributes": {"id": 1},
-            "rings": [[[116.39, 39.91], [116.40, 39.91], [116.40, 39.92], [116.39, 39.92], [116.39, 39.91]]],
-            "spatialReference": {"wkid": 4326},
-        }
-        fc, meta = geo_input.normalize_geo_input(geojson=payload)
-        self.assertEqual(len(fc["features"]), 1)
-        self.assertTrue(meta.get("esri_converted"))
-
-    def test_esri_fixture_file(self):
-        path = os.path.join(self.FIXTURES, "esri_featurecollection_rings.json")
-        out = mcp_server.analyze_regions(input_path=path, search_projects=False, search_poi=False)
-        self.assertEqual(out["feature_count"], 1)
-        self.assertGreater(out["features"][0].get("area_m2") or 0, 0)
-
-    def test_esri_paths_false_negative_converted(self):
-        path = os.path.join(self.FIXTURES, "esri_paths_false_negative.json")
-        fc, meta = geo_input.normalize_geo_input(input_path=path)
-        stats = mcp_server.geometry_stats(fc["features"][0], 0)
-        self.assertNotIn("error", stats)
-        self.assertEqual(stats.get("geometry_type"), "LineString")
-
-    def test_esri_inner_ring_geometry_simplified_alert(self):
-        path = os.path.join(self.FIXTURES, "esri_polygon_with_hole.json")
-        fc, meta = geo_input.normalize_geo_input(input_path=path)
-        codes = [a["code"] for a in meta["input_alerts"]]
-        self.assertIn("GEOMETRY_SIMPLIFIED", codes)
-        idx_alert = next(a for a in meta["input_alerts"] if a["code"] == "GEOMETRY_SIMPLIFIED")
-        self.assertIn(0, idx_alert.get("feature_indices", []))
-
-    def test_geometry_invalid_partial_alert(self):
-        good = json.loads(json.dumps(SQUARE))
-        bad = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": []}}
-        fc = {"type": "FeatureCollection", "features": [good, good, good, bad]}
-        with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "0.5"}):
-            out = mcp_server.analyze_regions(geojson=fc, search_projects=False, search_poi=False)
-        codes = [a["code"] for a in out["input_alerts"]]
-        self.assertIn("GEOMETRY_INVALID", codes)
-        alert = next(a for a in out["input_alerts"] if a["code"] == "GEOMETRY_INVALID")
-        self.assertEqual(alert["severity"], "warning")
-        self.assertIn(3, alert["invalid_indices"])
-
-    def test_geometry_fail_fast_half_invalid(self):
-        good = json.loads(json.dumps(SQUARE))
-        bad = {"type": "Feature", "properties": {}, "geometry": {}}
-        fc = {"type": "FeatureCollection", "features": [good, bad]}
-        with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "0.5"}):
-            with self.assertRaises(ValueError):
-                mcp_server.analyze_regions(geojson=fc, search_projects=False, search_poi=False)
+    def test_esri_top_level_rings_rejected(self):
+        payload = {"attributes": {}, "rings": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}
+        with self.assertRaises(ValueError) as ctx:
+            geo_input.load_geo_input(geojson=payload)
+        self.assertIn("Esri JSON", str(ctx.exception))
 
     def test_projected_without_crs_rejected(self):
         payload = {
@@ -578,76 +530,6 @@ class OsmEnabledTests(unittest.TestCase):
             self.assertEqual(rec["status"], "unavailable")
             self.assertEqual(rec["reason_code"], DISABLED)
         self.assertEqual(calls, [])
-
-
-class RateLimitSummaryTests(unittest.TestCase):
-    def test_batch_retry_recommended(self):
-        features = []
-        for i in range(4):
-            features.append({
-                "index": i,
-                "sources": [
-                    {"source": "amap", "status": "error", "reason_code": "RATE_LIMIT", "reason": "CUQPS"},
-                    {"source": "baidu", "status": "empty"},
-                    {"source": "osm", "status": "empty"},
-                ],
-            })
-        summary = mcp_server.summarize_online_channels(features)
-        self.assertTrue(summary["batch_retry_recommended"])
-        self.assertIn("rate_limit", summary)
-
-
-class CheckApiStatusTests(unittest.TestCase):
-    def test_tool_listed(self):
-        out = mcp_server.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
-        names = [t["name"] for t in out["result"]["tools"]]
-        self.assertIn("check_api_status", names)
-
-    def test_single_mode_no_key(self):
-        env = {k: v for k, v in os.environ.items() if k not in ("AMAP_KEY", "BAIDU_AK")}
-        with mock.patch.dict(os.environ, env, clear=True):
-            out = mcp_server.handle_tool("check_api_status", {"probe_mode": "single"})
-        body = json.loads(out["content"][0]["text"])
-        self.assertFalse(body["amap"]["key_valid"])
-
-    def test_burst_mode_detects_concurrent_limit(self):
-        call_counts = {"n": 0}
-
-        def fake_query(lat, lon, radius, keywords):
-            call_counts["n"] += 1
-            if call_counts["n"] >= 4:
-                return {"status": "error", "reason_code": "RATE_LIMIT", "reason": "CUQPS"}
-            return {"status": "ok", "pois": []}
-
-        with mock.patch.object(geo_clients, "query_amap", side_effect=fake_query):
-            with mock.patch.dict(os.environ, {"AMAP_KEY": "k", "BURST_PROBE_MAX_CONCURRENCY": "8"}):
-                out = geo_clients.probe_amap_burst(23.1, 113.2)
-        self.assertTrue(out["concurrent_limit_detected"])
-        self.assertEqual(out["rate_limit_at_concurrency"], 3)
-        self.assertEqual(out["estimated_concurrent_limit"], 2)
-        self.assertEqual(out["suggested_amap_qps_limit"], 2)
-
-
-class AmapRetryTests(unittest.TestCase):
-    def test_amap_retries_on_rate_limit(self):
-        calls = {"n": 0}
-
-        class Fake:
-            counts = {"amap": 0, "baidu": 0, "overpass": 0, "total": 0}
-
-            def request_json(self, url, **kwargs):
-                calls["n"] += 1
-                if "amap" in url and calls["n"] == 1:
-                    return {"status": "0", "info": "CUQPS_HAS_EXCEEDED_THE_LIMIT"}
-                if "amap" in url:
-                    return {"status": "1", "pois": []}
-                return {"status": 0, "results": []}
-
-        with mock.patch.object(geo_clients, "get_http", return_value=Fake()):
-            with mock.patch.dict(os.environ, {"AMAP_KEY": "k", "BAIDU_AK": "k", "AMAP_RETRY_MAX": "2"}):
-                out = geo_clients.query_amap(23.1, 113.2, 300, None)
-        self.assertGreater(calls["n"], 1)
-        self.assertIn(out["status"], ("ok", "empty", "error"))
 
 
 if __name__ == "__main__":
