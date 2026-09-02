@@ -5,7 +5,7 @@
 - `analyze_regions` — 几何统计 + 在线证据（推荐 `input_path` 读取大 GeoJSON）
 - `calculate_geometry` — 仅离线几何统计
 
-## 与 MCP v2.4+ 的差异
+## 与 MCP v2.5+ 的差异
 
 | 项目 | MCP 主路径 | 本目录（如 `geo_stats.py`） |
 |------|-----------|---------------------------|

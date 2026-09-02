@@ -70,6 +70,7 @@ geo-region-inference/
 | OSM / Overpass 半径与字段解读 | [references/overpass_query_guide.md](references/overpass_query_guide.md) |
 | 属性 / POI 字段线索启发 | [references/project_inference_signals.md](references/project_inference_signals.md) |
 | 区域类型词汇 | [references/landuse_taxonomy.md](references/landuse_taxonomy.md) |
+| 错误码与告警 | [references/error_codes.md](references/error_codes.md) |
 | scripts 废弃说明 | [scripts/README.md](scripts/README.md) |
 
 ---
@@ -80,7 +81,7 @@ geo-region-inference/
 2. 配置 Host：指向 `.venv` 的 Python + `mcp_server.py`；`env` 注入 `AMAP_KEY` / `BAIDU_AK` 等（见 [map_api_setup.md](references/map_api_setup.md)）。
 3. Agent 按 [SKILL.md](SKILL.md) 执行：`analyze_regions` →（可选 gov Web）→ 推理 → `validate_result`。
 
-**输入**：GeoJSON / `input_path`；SHP 须宿主先转 GeoJSON；勿传 Esri REST JSON（见 SKILL 第一步）。
+**输入**：GeoJSON / `input_path`；SHP 须宿主先转 GeoJSON；Esri REST JSON v2.5+ 可尝试自动转换（见 SKILL 第一步）。
 
 **MCP 工具一览**（细节见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)）：
 
@@ -89,6 +90,7 @@ geo-region-inference/
 | `analyze_regions` | 主路径：几何 + 并发在线证据 |
 | `prepare_gov_web_search` | 四轮政府 Web 搜索计划（无 HTTP） |
 | `validate_result` | 最终 JSON 结构与置信度校验 |
+| `check_api_status` | 验活 Key / burst 诊断 CUQPS |
 | `calculate_geometry` | 调试：仅离线几何 |
 | `search_project_evidence` | 调试：单点项目检索 |
 

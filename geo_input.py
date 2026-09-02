@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,14 +13,18 @@ GEOJSON_TYPES = frozenset(
     {"FeatureCollection", "Feature", "Point", "MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon", "GeometryCollection"}
 )
 ESRI_EXPORT_HINT = (
-    "检测到 ArcGIS Esri JSON 格式。请在 ArcGIS 中选择「导出为 GeoJSON」并指定坐标系，"
+    "检测到 ArcGIS Esri JSON 格式且无法自动转换为 GeoJSON。请在 ArcGIS 中选择「导出为 GeoJSON」并指定坐标系，"
     "然后使用 analyze_regions(input_path=导出的.geojson)。"
 )
 CRS_ASSUMED_MESSAGE = (
     "文件未声明坐标系，已假定 WGS84 (EPSG:4326)；若位置明显不对请重新导出并指定坐标系。"
 )
+GEOMETRY_SIMPLIFIED_MESSAGE = (
+    "部分地物 Esri 几何经简化转换（如仅保留外环），面积/形状可能不准确；建议 ArcGIS 导出标准 GeoJSON。"
+)
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 TARGET_EPSG = 4326
+DEFAULT_GEOMETRY_FAIL_RATIO = 0.5
 
 
 @dataclass
@@ -29,6 +33,19 @@ class CRSInfo:
     wkid: int | None
     assumed: bool = False
     raw: str | None = None
+
+
+@dataclass
+class EsriConvertMeta:
+    converted: bool = False
+    simplified_indices: list[int] = field(default_factory=list)
+
+
+def geometry_fail_ratio() -> float:
+    raw = os.environ.get("GEOMETRY_FAIL_RATIO", "").strip()
+    if raw:
+        return float(raw)
+    return DEFAULT_GEOMETRY_FAIL_RATIO
 
 
 def _max_bytes() -> int:
@@ -71,26 +88,164 @@ def _validate_path(path: Path) -> None:
             raise ValueError(f"input_path must be under GEO_INPUT_ROOT ({root}) when GEO_INPUT_STRICT=true") from e
 
 
+def _has_valid_geojson_coordinates(geom: dict[str, Any]) -> bool:
+    coords = geom.get("coordinates")
+    if coords is None:
+        return False
+    flat: list[tuple[float, float]] = []
+
+    def walk(c: Any) -> None:
+        if not c:
+            return
+        if isinstance(c[0], (int, float)):
+            flat.append((float(c[0]), float(c[1])))
+            return
+        for part in c:
+            walk(part)
+
+    walk(coords)
+    return len(flat) > 0
+
+
+def _geometry_looks_esri(geom: dict[str, Any] | None) -> bool:
+    if not isinstance(geom, dict):
+        return False
+    if _has_valid_geojson_coordinates(geom):
+        return False
+    if "rings" in geom or "paths" in geom:
+        return True
+    if "x" in geom and "y" in geom:
+        return True
+    return False
+
+
 def _looks_like_esri(payload: dict[str, Any]) -> bool:
     gtype = payload.get("type")
-    if gtype in GEOJSON_TYPES:
-        return False
     if payload.get("geometryType") and gtype not in GEOJSON_TYPES:
         return True
     if "rings" in payload and "attributes" in payload:
         return True
-    feats = payload.get("features")
-    if isinstance(feats, list) and feats:
-        first = feats[0]
-        if isinstance(first, dict):
-            geom = first.get("geometry")
-            if first.get("attributes") and isinstance(geom, dict):
-                if "rings" in geom or "paths" in geom:
-                    return True
     sr = payload.get("spatialReference")
     if isinstance(sr, dict) and sr.get("wkid") is not None and gtype not in GEOJSON_TYPES:
         return True
+    feats = payload.get("features")
+    if isinstance(feats, list):
+        for feat in feats:
+            if not isinstance(feat, dict):
+                continue
+            geom = feat.get("geometry")
+            if isinstance(geom, dict) and _geometry_looks_esri(geom):
+                return True
+    if gtype == "FeatureCollection" and isinstance(feats, list):
+        for feat in feats:
+            if isinstance(feat, dict) and _geometry_looks_esri(feat.get("geometry")):
+                return True
     return False
+
+
+def _convert_esri_geometry(geom: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+    if not isinstance(geom, dict):
+        return None, []
+    if _has_valid_geojson_coordinates(geom):
+        return geom, []
+    simplifications: list[str] = []
+    if "rings" in geom:
+        rings = geom.get("rings") or []
+        if not rings:
+            return None, []
+        if len(rings) > 1:
+            simplifications.append("dropped_inner_rings")
+        outer = rings[0]
+        if not outer:
+            return None, []
+        return {"type": "Polygon", "coordinates": [outer]}, simplifications
+    if "paths" in geom:
+        paths = geom.get("paths") or []
+        if not paths:
+            return None, []
+        simplifications.append("paths_converted")
+        if len(paths) == 1:
+            return {"type": "LineString", "coordinates": paths[0]}, simplifications
+        return {"type": "MultiLineString", "coordinates": paths}, simplifications
+    if "x" in geom and "y" in geom:
+        return {"type": "Point", "coordinates": [float(geom["x"]), float(geom["y"])]}, simplifications
+    return None, []
+
+
+def _feature_properties(feat: dict[str, Any]) -> dict[str, Any]:
+    if "properties" in feat and isinstance(feat.get("properties"), dict):
+        return dict(feat["properties"])
+    attrs = feat.get("attributes")
+    if isinstance(attrs, dict):
+        return dict(attrs)
+    return {}
+
+
+def try_convert_esri_to_geojson(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, EsriConvertMeta]:
+    meta = EsriConvertMeta()
+    if not _looks_like_esri(payload):
+        return None, meta
+
+    out: dict[str, Any] = {}
+    if payload.get("type") in GEOJSON_TYPES:
+        out["type"] = payload["type"]
+    else:
+        out["type"] = "FeatureCollection"
+
+    if "spatialReference" in payload:
+        sr = payload["spatialReference"]
+        if isinstance(sr, dict) and sr.get("wkid") is not None:
+            out["crs"] = {"type": "name", "properties": {"name": f"EPSG:{int(sr['wkid'])}"}}
+
+    if "rings" in payload and "attributes" in payload:
+        geom, simplifications = _convert_esri_geometry(payload)
+        if geom is None:
+            return None, meta
+        if simplifications:
+            meta.simplified_indices.append(0)
+        meta.converted = True
+        return {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "properties": dict(payload.get("attributes") or {}),
+                "geometry": geom,
+            }],
+            **({"crs": out["crs"]} if "crs" in out else {}),
+        }, meta
+
+    feats = payload.get("features")
+    if not isinstance(feats, list):
+        return None, meta
+
+    converted_features: list[dict[str, Any]] = []
+    for idx, feat in enumerate(feats):
+        if not isinstance(feat, dict):
+            continue
+        geom_raw = feat.get("geometry")
+        if not isinstance(geom_raw, dict):
+            continue
+        geom, simplifications = _convert_esri_geometry(geom_raw)
+        if geom is None:
+            continue
+        if simplifications:
+            meta.simplified_indices.append(idx)
+        converted_features.append({
+            "type": "Feature",
+            "properties": _feature_properties(feat),
+            "geometry": geom,
+        })
+
+    if not converted_features:
+        return None, meta
+
+    meta.converted = True
+    result: dict[str, Any] = {"type": "FeatureCollection", "features": converted_features}
+    if "crs" in out:
+        result["crs"] = out["crs"]
+    elif isinstance(payload.get("crs"), dict):
+        result["crs"] = payload["crs"]
+    return result, meta
 
 
 def _parse_epsg_from_name(name: str) -> int | None:
@@ -248,17 +403,69 @@ def reproject_to_wgs84(fc: dict[str, Any], crs_info: CRSInfo) -> tuple[dict[str,
     return out, meta
 
 
-def build_input_alerts(crs_meta: dict[str, Any]) -> list[dict[str, Any]]:
+def build_input_alerts(crs_meta: dict[str, Any], *, esri_meta: EsriConvertMeta | None = None) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
     if crs_meta.get("crs_assumed"):
         alerts.append({"code": "CRS_ASSUMED", "severity": "warning", "user_message": CRS_ASSUMED_MESSAGE})
+    if esri_meta and esri_meta.simplified_indices:
+        alerts.append({
+            "code": "GEOMETRY_SIMPLIFIED",
+            "severity": "warning",
+            "feature_indices": list(esri_meta.simplified_indices),
+            "user_message": GEOMETRY_SIMPLIFIED_MESSAGE,
+        })
     return alerts
+
+
+def is_geometry_stat_invalid(stat: dict[str, Any]) -> bool:
+    if stat.get("error"):
+        return True
+    if "centroid" not in stat:
+        return True
+    gt = stat.get("geometry_type")
+    if gt in ("Polygon", "MultiPolygon") and stat.get("area_m2") is None:
+        return True
+    return False
+
+
+def build_geometry_invalid_alerts(stats: list[dict[str, Any]], feature_count: int) -> list[dict[str, Any]]:
+    invalid_indices = [s["index"] for s in stats if is_geometry_stat_invalid(s)]
+    if not invalid_indices:
+        return []
+    invalid_count = len(invalid_indices)
+    severity = "error" if invalid_count >= feature_count else "warning"
+    return [{
+        "code": "GEOMETRY_INVALID",
+        "severity": severity,
+        "invalid_count": invalid_count,
+        "invalid_indices": invalid_indices,
+        "user_message": (
+            f"{invalid_count}/{feature_count} 个地物几何无效或无法计算面积/质心，"
+            "这些地物结果不完整；请检查 GeoJSON/Esri 格式。"
+        ),
+    }]
+
+
+def validate_geometry_fail_fast(stats: list[dict[str, Any]], feature_count: int) -> None:
+    if feature_count <= 0:
+        return
+    invalid_count = sum(1 for s in stats if is_geometry_stat_invalid(s))
+    if invalid_count <= 0:
+        return
+    ratio = invalid_count / feature_count
+    if ratio >= geometry_fail_ratio():
+        raise ValueError(
+            f"{invalid_count}/{feature_count} features have invalid geometry "
+            f"(ratio {ratio:.2f} >= GEOMETRY_FAIL_RATIO {geometry_fail_ratio()}). "
+            "Check Esri/GeoJSON format and re-export from ArcGIS."
+        )
 
 
 def load_geo_input(*, geojson: dict[str, Any] | None = None, input_path: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     if (geojson is None) == (input_path is None):
         raise ValueError("Provide exactly one of geojson or input_path")
     load_meta: dict[str, Any] = {"source_path": None, "byte_size": None, "format_hint": "geojson"}
+    esri_meta = EsriConvertMeta()
     if input_path is not None:
         path = Path(input_path)
         _validate_path(path)
@@ -272,12 +479,22 @@ def load_geo_input(*, geojson: dict[str, Any] | None = None, input_path: str | N
     if not isinstance(payload, dict):
         raise ValueError("Geo input must be a JSON object")
     if _looks_like_esri(payload):
-        raise ValueError(ESRI_EXPORT_HINT)
+        converted, esri_meta = try_convert_esri_to_geojson(payload)
+        if converted is None:
+            raise ValueError(ESRI_EXPORT_HINT)
+        payload = converted
+        load_meta["format_hint"] = "esri_converted"
+        load_meta["esri_converted"] = True
+    load_meta["esri_simplified_indices"] = list(esri_meta.simplified_indices)
     return payload, load_meta
 
 
 def normalize_geo_input(*, geojson: dict[str, Any] | None = None, input_path: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     payload, load_meta = load_geo_input(geojson=geojson, input_path=input_path)
+    esri_meta = EsriConvertMeta(
+        converted=bool(load_meta.get("esri_converted")),
+        simplified_indices=list(load_meta.get("esri_simplified_indices") or []),
+    )
     fc = to_feature_collection(payload)
     crs_info = extract_crs_info(payload, fc)
     if crs_info.assumed and _coords_look_projected(fc):
@@ -288,5 +505,5 @@ def normalize_geo_input(*, geojson: dict[str, Any] | None = None, input_path: st
     fc, crs_meta = reproject_to_wgs84(fc, crs_info)
     fc, z_stripped = strip_z_to_2d(fc)
     input_meta = {**load_meta, "crs": crs_meta, "z_stripped": z_stripped}
-    input_meta["input_alerts"] = build_input_alerts(crs_meta)
+    input_meta["input_alerts"] = build_input_alerts(crs_meta, esri_meta=esri_meta)
     return fc, input_meta
