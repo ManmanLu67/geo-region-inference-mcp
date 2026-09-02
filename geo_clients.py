@@ -5,12 +5,30 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
+import threading
+import time
 import urllib.parse
 from typing import Any
 
 import httpx
 
-HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT_SECONDS", "12"))
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    return float(raw)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    return int(raw)
+
+
+HTTP_TIMEOUT = _env_float("HTTP_TIMEOUT_SECONDS", 12.0)
 OVERPASS_URL = os.environ.get("OVERPASS_URL", "https://overpass-api.de/api/interpreter")
 OVERPASS_BATCH_SIZE = 10
 # Set OSM_ENABLED=false to skip all Overpass calls (e.g. when the Overpass host
@@ -19,9 +37,49 @@ OSM_ENABLED = os.environ.get("OSM_ENABLED", "true").strip().lower() not in (
     "0", "false", "no", "off"
 )
 BAIDU_DEFAULT_QUERY = "公司|住宅|写字楼|生活服务"
-PROJECT_KEYWORDS = "在建|项目|工地|建设"
+PROJECT_KEYWORDS = os.environ.get("PROJECT_KEYWORDS", "在建|项目|工地|建设")
 EXPAND_RADIUS_FACTOR = 2.5
 EXPAND_RADIUS_MAX_M = 5000.0
+AMAP_QPS_LIMIT = _env_float("AMAP_QPS_LIMIT", 3.0)
+BAIDU_QPS_LIMIT = _env_float("BAIDU_QPS_LIMIT", 3.0)
+AMAP_BATCH_SIZE = _env_int("AMAP_BATCH_SIZE", 5)
+AMAP_BATCH_DELAY_MS = _env_int("AMAP_BATCH_DELAY_MS", 2000)
+AMAP_RETRY_MAX = _env_int("AMAP_RETRY_MAX", 3)
+AMAP_RETRY_BASE_MS = _env_int("AMAP_RETRY_BASE_MS", 500)
+BAIDU_RETRY_MAX = _env_int("BAIDU_RETRY_MAX", 3)
+BAIDU_RETRY_BASE_MS = _env_int("BAIDU_RETRY_BASE_MS", 500)
+RATE_LIMIT_BATCH_RATIO = _env_float("RATE_LIMIT_BATCH_RATIO", 0.25)
+BURST_PROBE_TIMEOUT_MS = _env_int("BURST_PROBE_TIMEOUT_MS", 3000)
+BURST_PROBE_MAX_CONCURRENCY = _env_int("BURST_PROBE_MAX_CONCURRENCY", 8)
+LAST_RETRY_AFTER_MS: dict[str, int] = {"amap": 0, "baidu": 0}
+
+
+class TokenBucket:
+    def __init__(self, rate: float) -> None:
+        self.rate = max(rate, 0.1)
+        self.capacity = max(rate, 1.0)
+        self.tokens = self.capacity
+        self.updated = time.monotonic()
+        self.lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self.lock:
+            now = time.monotonic()
+            elapsed = now - self.updated
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            self.updated = now
+            if self.tokens >= 1.0:
+                self.tokens -= 1.0
+                return
+            wait = (1.0 - self.tokens) / self.rate
+            self.tokens = 0.0
+            self.updated = now + wait
+        if wait > 0:
+            time.sleep(wait)
+
+
+_AMAP_BUCKET = TokenBucket(AMAP_QPS_LIMIT)
+_BAIDU_BUCKET = TokenBucket(BAIDU_QPS_LIMIT)
 
 NO_API_KEY = "NO_API_KEY"
 INVALID_API_KEY = "INVALID_API_KEY"
@@ -256,6 +314,48 @@ def close_http() -> None:
         _HTTP = None
 
 
+def _backoff_sleep(source: str, attempt: int, base_ms: int) -> None:
+    delay_ms = base_ms * (2**attempt) + random.randint(0, base_ms // 2)
+    LAST_RETRY_AFTER_MS[source] = delay_ms
+    time.sleep(delay_ms / 1000.0)
+
+
+def _is_rate_limited_result(result: dict[str, Any]) -> bool:
+    return result.get("reason_code") == RATE_LIMIT
+
+
+def run_amap_baidu_job_batches(
+    jobs: list[tuple[int, float, float, float]],
+    keywords: str | None,
+    max_workers: int,
+) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
+    """Run jobs in batches with optional inter-batch delay."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    amap_by: dict[int, dict[str, Any]] = {}
+    baidu_by: dict[int, dict[str, Any]] = {}
+    if not jobs:
+        return amap_by, baidu_by
+    workers = min(max(max_workers, 1), 4)
+    batch_size = max(AMAP_BATCH_SIZE, 1) if AMAP_BATCH_SIZE > 0 else len(jobs)
+
+    def one(job: tuple[int, float, float, float]):
+        idx, lat, lon, radius = job
+        return idx, query_amap(lat, lon, radius, keywords), query_baidu(lat, lon, radius, keywords)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for start in range(0, len(jobs), batch_size):
+            chunk = jobs[start : start + batch_size]
+            futs = [pool.submit(one, job) for job in chunk]
+            for fut in as_completed(futs):
+                idx, amap, baidu = fut.result()
+                amap_by[idx] = amap
+                baidu_by[idx] = baidu
+            if start + batch_size < len(jobs) and AMAP_BATCH_DELAY_MS > 0:
+                time.sleep(AMAP_BATCH_DELAY_MS / 1000.0)
+    return amap_by, baidu_by
+
+
 def _http_fail(source: str, exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, TimeoutError):
         code, reason = TIMEOUT, str(exc)
@@ -285,12 +385,24 @@ def query_amap(lat: float, lon: float, radius: float, keywords: str | None = Non
     if keywords:
         params["keywords"] = keywords
     url = "https://restapi.amap.com/v3/place/around?" + urllib.parse.urlencode(params)
-    try:
-        raw = get_http().request_json(url)
-    except (TimeoutError, RateLimitError, httpx.HTTPError, json.JSONDecodeError) as e:
-        return _http_fail("amap", e)
-    classified = classify_amap_around(raw)
-    return _source_shell("amap", **classified)
+    last: dict[str, Any] | None = None
+    for attempt in range(AMAP_RETRY_MAX + 1):
+        _AMAP_BUCKET.acquire()
+        try:
+            raw = get_http().request_json(url)
+        except (TimeoutError, RateLimitError, httpx.HTTPError, json.JSONDecodeError) as e:
+            last = _http_fail("amap", e)
+            if last.get("reason_code") == RATE_LIMIT and attempt < AMAP_RETRY_MAX:
+                _backoff_sleep("amap", attempt, AMAP_RETRY_BASE_MS)
+                continue
+            return last
+        classified = classify_amap_around(raw)
+        last = _source_shell("amap", **classified)
+        if _is_rate_limited_result(last) and attempt < AMAP_RETRY_MAX:
+            _backoff_sleep("amap", attempt, AMAP_RETRY_BASE_MS)
+            continue
+        return last
+    return last or _source_shell("amap", status="error", reason_code=UPSTREAM_ERROR, reason="amap failed")
 
 
 def query_baidu(lat: float, lon: float, radius: float, keywords: str | None = None) -> dict[str, Any]:
@@ -308,12 +420,100 @@ def query_baidu(lat: float, lon: float, radius: float, keywords: str | None = No
         "query": keywords or BAIDU_DEFAULT_QUERY,
     }
     url = "https://api.map.baidu.com/place/v2/search?" + urllib.parse.urlencode(params)
-    try:
-        raw = get_http().request_json(url)
-    except (TimeoutError, RateLimitError, httpx.HTTPError, json.JSONDecodeError) as e:
-        return _http_fail("baidu", e)
-    classified = classify_baidu_search(raw)
-    return _source_shell("baidu", **classified)
+    last: dict[str, Any] | None = None
+    for attempt in range(BAIDU_RETRY_MAX + 1):
+        _BAIDU_BUCKET.acquire()
+        try:
+            raw = get_http().request_json(url)
+        except (TimeoutError, RateLimitError, httpx.HTTPError, json.JSONDecodeError) as e:
+            last = _http_fail("baidu", e)
+            if last.get("reason_code") == RATE_LIMIT and attempt < BAIDU_RETRY_MAX:
+                _backoff_sleep("baidu", attempt, BAIDU_RETRY_BASE_MS)
+                continue
+            return last
+        classified = classify_baidu_search(raw)
+        last = _source_shell("baidu", **classified)
+        if _is_rate_limited_result(last) and attempt < BAIDU_RETRY_MAX:
+            _backoff_sleep("baidu", attempt, BAIDU_RETRY_BASE_MS)
+            continue
+        return last
+    return last or _source_shell("baidu", status="error", reason_code=UPSTREAM_ERROR, reason="baidu failed")
+
+
+def probe_amap_burst(lat: float, lon: float, radius: float = 200.0) -> dict[str, Any]:
+    """Incremental concurrent burst probe for CUQPS; stops on first rate limit."""
+    key = os.environ.get("AMAP_KEY")
+    if not key:
+        return {"key_valid": False, "reason_code": NO_API_KEY, "concurrent_limit_detected": False}
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    deadline = time.monotonic() + BURST_PROBE_TIMEOUT_MS / 1000.0
+    rate_limit_at: int | None = None
+    max_c = max(1, min(BURST_PROBE_MAX_CONCURRENCY, 8))
+    for concurrency in range(1, max_c + 1):
+        if time.monotonic() >= deadline:
+            break
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futs = [pool.submit(query_amap, lat, lon, radius, None) for _ in range(concurrency)]
+            results = []
+            for fut in as_completed(futs):
+                results.append(fut.result())
+            if any(_is_rate_limited_result(r) for r in results):
+                rate_limit_at = concurrency
+                break
+    out: dict[str, Any] = {
+        "key_valid": True,
+        "concurrent_limit_detected": rate_limit_at is not None,
+    }
+    if rate_limit_at is not None:
+        out["rate_limit_at_concurrency"] = rate_limit_at
+        out["estimated_concurrent_limit"] = max(rate_limit_at - 1, 1)
+        out["suggested_amap_qps_limit"] = out["estimated_concurrent_limit"]
+        out["hint"] = (
+            f"第 {rate_limit_at} 路并发触发 CUQPS；建议 AMAP_QPS_LIMIT≤{out['suggested_amap_qps_limit']} "
+            "（并发上限估算，非官方配额）"
+        )
+    else:
+        out["hint"] = "burst 探测未触发 CUQPS（不保证大批量 analyze_regions 无限流）"
+    return out
+
+
+def probe_api_status(
+    lat: float,
+    lon: float,
+    *,
+    probe_mode: str = "single",
+) -> dict[str, Any]:
+    amap_single = query_amap(lat, lon, 200.0, None)
+    baidu_single = query_baidu(lat, lon, 200.0, None)
+    result: dict[str, Any] = {
+        "probe_mode": probe_mode,
+        "center": {"lat": lat, "lon": lon},
+        "disclaimer": "estimated_* 为客户端探测估算，请以高德/百度控制台为准",
+        "amap": {
+            "key_valid": amap_single.get("reason_code") != NO_API_KEY,
+            "status": amap_single.get("status"),
+            "reason_code": amap_single.get("reason_code"),
+        },
+        "baidu": {
+            "key_valid": baidu_single.get("reason_code") != NO_API_KEY,
+            "status": baidu_single.get("status"),
+            "reason_code": baidu_single.get("reason_code"),
+        },
+    }
+    if probe_mode == "burst":
+        result["amap"].update(probe_amap_burst(lat, lon))
+        result["disclaimer"] = (
+            "single 模式不能预测并发限流；burst 为 CUQPS 估算。"
+            + result["disclaimer"]
+        )
+    else:
+        result["disclaimer"] = (
+            "single（默认）仅验活 Key，不能预测批量 analyze_regions 的并发限流。"
+            "如需诊断 CUQPS，请 probe_mode=burst。"
+            + result["disclaimer"]
+        )
+    return result
 
 
 def _summarize_overpass_elements(elements: list[dict[str, Any]]) -> dict[str, Any]:

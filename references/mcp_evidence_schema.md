@@ -9,7 +9,7 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 ```jsonc
 {
   "server": "geo-region-inference",
-  "server_version": "2.4.0",
+  "server_version": "2.5.0",
   "feature_count": 2,
   "input_meta": {
     "source_path": "D:/项目/地块.geojson",
@@ -29,7 +29,11 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 }
 ```
 
-- **`input_alerts`**：Agent **必须**向用户转述（与 `online_summary.warnings` 同级）。`CRS_ASSUMED` 表示文件未声明坐标系、已假定 WGS84。
+- **`input_alerts`**：Agent **必须**向用户转述（与 `online_summary.warnings` 同级）。常见 code：
+  - `CRS_ASSUMED`：未声明 CRS，已假定 WGS84
+  - `GEOMETRY_INVALID`：部分/全部地物几何无效；**必须**列出 `invalid_indices`
+  - `GEOMETRY_SIMPLIFIED`：Esri 转换简化（如丢洞）；**必须**列出 `feature_indices`
+  - 完整表见 [error_codes.md](error_codes.md)
 - **`online_summary`**：仅当 `search_projects` 或 `search_poi` 为 true 时出现。`all_channels_unavailable=true` 表示三通道均无 `ok`/`empty`，**不是**「无项目」。
 - 单次请求最多 **80** 个 feature（`MAX_FEATURES`），超限返回 error。
 
@@ -174,8 +178,15 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 | `GEO_INPUT_MAX_BYTES` | 文件输入大小上限（默认 67108864） |
 | `GEO_INPUT_STRICT` | 设为 `true` 时启用路径沙箱（须在 `GEO_INPUT_ROOT` 下） |
 | `GEO_INPUT_ROOT` | 严格模式根目录（默认用户主目录） |
+| `AMAP_QPS_LIMIT` | 高德令牌桶速率（默认 **3**，对齐实测 ≈2.5 QPS） |
+| `AMAP_BATCH_SIZE` | 批大小（默认 **5**） |
+| `AMAP_BATCH_DELAY_MS` | 批间间隔 ms（默认 **2000**） |
+| `AMAP_RETRY_MAX` | 高德退避重试次数（默认 3） |
+| `GEOMETRY_FAIL_RATIO` | 无效几何占比 ≥ 此值 hard fail（默认 **0.5**） |
+| `RATE_LIMIT_BATCH_RATIO` | 限流占比 ≥ 此值时 `batch_retry_recommended`（默认 **0.25**） |
+| `PROJECT_KEYWORDS` | 项目 POI 关键词（默认 `在建\|项目\|工地\|建设`） |
 
-配置细节见 [map_api_setup.md](map_api_setup.md)。
+错误码与告警见 [error_codes.md](error_codes.md)。
 
 **依赖**：MCP Server 需 `pip install -r requirements-mcp.txt`（含 `pyproj` 用于 CRS 重投影）。
 

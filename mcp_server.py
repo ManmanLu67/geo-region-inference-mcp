@@ -10,29 +10,37 @@ from __future__ import annotations
 
 import json
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from geo_clients import (
     EXPAND_RADIUS_FACTOR,
     EXPAND_RADIUS_MAX_M,
+    LAST_RETRY_AFTER_MS,
     PROJECT_KEYWORDS,
+    RATE_LIMIT,
+    RATE_LIMIT_BATCH_RATIO,
     close_http,
     maybe_regeo_amap,
     maybe_regeo_baidu,
     merge_source_records,
     overpass_query,
     overpass_query_batch,
+    probe_api_status,
     query_amap,
     query_baidu,
+    run_amap_baidu_job_batches,
 )
 from geo_geometry import feature_list, geometry_stats, radius_from_stats
-from geo_input import normalize_geo_input
+from geo_input import (
+    build_geometry_invalid_alerts,
+    normalize_geo_input,
+    validate_geometry_fail_fast,
+)
 from gov_search import prepare_gov_web_search
 from validation import schema_data_source, validate_payload
 
 SERVER_NAME = "geo-region-inference"
-SERVER_VERSION = "2.4.0"
+SERVER_VERSION = "2.5.0"
 
 _CHANNEL_RANK = {"ok": 4, "empty": 3, "error": 2, "unavailable": 1}
 MAX_FEATURES = 80
@@ -111,18 +119,29 @@ def _compact_source(c: dict[str, Any], direct: list[dict[str, Any]]) -> dict[str
 
 def summarize_online_channels(features: list[dict[str, Any]]) -> dict[str, Any]:
     channels: dict[str, dict[str, Any]] = {}
+    feature_count = len(features)
+    rate_limit: dict[str, dict[str, Any]] = {}
     for name in ("amap", "baidu", "osm"):
         best: dict[str, Any] | None = None
         best_rank = 0
+        rl_count = 0
         for feat in features:
             for src in feat.get("sources") or []:
                 if src.get("source") != name:
                     continue
+                if src.get("reason_code") == RATE_LIMIT:
+                    rl_count += 1
                 status = str(src.get("status") or "unavailable")
                 rank = _CHANNEL_RANK.get(status, 0)
                 if rank > best_rank:
                     best_rank = rank
                     best = src
+        ratio = (rl_count / feature_count) if feature_count else 0.0
+        rate_limit[name] = {
+            "feature_count": rl_count,
+            "feature_ratio": round(ratio, 4),
+            "retry_after_hint_ms": LAST_RETRY_AFTER_MS.get(name, 0),
+        }
         if best:
             channels[name] = {
                 "status": best.get("status"),
@@ -138,6 +157,10 @@ def summarize_online_channels(features: list[dict[str, Any]]) -> dict[str, Any]:
         if status in ("unavailable", "error"):
             label = {"amap": "高德", "baidu": "百度", "osm": "OSM"}.get(name, name)
             warnings.append(f"{label}: {reason}")
+        rl = rate_limit.get(name, {})
+        if rl.get("feature_count", 0) > 0:
+            label = {"amap": "高德", "baidu": "百度", "osm": "OSM"}.get(name, name)
+            warnings.append(f"{label}: {rl['feature_count']} 个地物遭遇限流（已自动退避重试）")
     usable = sum(1 for c in channels.values() if c.get("status") in ("ok", "empty"))
     all_failed = usable == 0
     user_message = None
@@ -145,8 +168,18 @@ def summarize_online_channels(features: list[dict[str, Any]]) -> dict[str, Any]:
         user_message = (
             "所有在线数据源均不可用，结果仅为离线几何统计；请配置 AMAP_KEY / BAIDU_AK 或检查 Overpass 连通性。"
         )
+    batch_retry_recommended = False
+    batch_retry_reason = None
+    for name, rl in rate_limit.items():
+        if rl.get("feature_ratio", 0) >= RATE_LIMIT_BATCH_RATIO:
+            batch_retry_recommended = True
+            batch_retry_reason = f"{name} rate_limit ratio {rl['feature_ratio']} >= threshold {RATE_LIMIT_BATCH_RATIO}"
+            break
     return {
         "channels": channels,
+        "rate_limit": rate_limit,
+        "batch_retry_recommended": batch_retry_recommended,
+        "batch_retry_reason": batch_retry_reason,
         "all_channels_unavailable": all_failed,
         "warnings": warnings,
         "user_message": user_message,
@@ -178,23 +211,7 @@ def _amap_baidu_for_jobs(
     keywords: str | None,
     max_workers: int,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
-    amap_by: dict[int, dict[str, Any]] = {}
-    baidu_by: dict[int, dict[str, Any]] = {}
-    if not jobs:
-        return amap_by, baidu_by
-    workers = min(max(max_workers, 1), 4)
-
-    def one(job: tuple[int, float, float, float]):
-        idx, lat, lon, radius = job
-        return idx, query_amap(lat, lon, radius, keywords), query_baidu(lat, lon, radius, keywords)
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [pool.submit(one, job) for job in jobs]
-        for fut in as_completed(futs):
-            idx, amap, baidu = fut.result()
-            amap_by[idx] = amap
-            baidu_by[idx] = baidu
-    return amap_by, baidu_by
+    return run_amap_baidu_job_batches(jobs, keywords, max_workers)
 
 
 def analyze_regions(
@@ -212,6 +229,8 @@ def analyze_regions(
     if len(feats) > MAX_FEATURES:
         raise ValueError(f"feature_count {len(feats)} exceeds limit {MAX_FEATURES}")
     stats = [geometry_stats(f, i) for i, f in enumerate(feats)]
+    validate_geometry_fail_fast(stats, len(feats))
+    input_alerts.extend(build_geometry_invalid_alerts(stats, len(feats)))
     jobs: list[tuple[int, float, float, float]] = []
     for s in stats:
         if "centroid" not in s:
@@ -320,6 +339,17 @@ def validate_result(result: dict[str, Any]) -> dict[str, Any]:
     return validate_payload(result)
 
 
+def check_api_status(
+    lat: float | None = None,
+    lon: float | None = None,
+    probe_mode: str = "single",
+) -> dict[str, Any]:
+    plat = float(lat if lat is not None else 39.9042)
+    plon = float(lon if lon is not None else 116.4074)
+    mode = probe_mode if probe_mode in ("single", "burst") else "single"
+    return probe_api_status(plat, plon, probe_mode=mode)
+
+
 TOOLS = {
     "analyze_regions": {
         "description": "Batch-process a GeoJSON/FeatureCollection from inline geojson or input_path: geometry stats plus concurrent AMap/Baidu/OSM evidence. When search_projects is true, project-keyword search already covers the POI channel; search_poi does not add a second query.",
@@ -384,6 +414,26 @@ TOOLS = {
                 }
             },
             "required": ["analyze_result"],
+        },
+    },
+    "check_api_status": {
+        "description": (
+            "Probe AMap/Baidu API key health. single (default): key validity only — cannot predict concurrent "
+            "rate limits for bulk analyze_regions. burst: diagnose CUQPS with incremental concurrent probes; "
+            "stops on first rate limit; consumes small quota."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "lat": {"type": "number", "description": "Probe latitude (default Beijing)."},
+                "lon": {"type": "number", "description": "Probe longitude (default Beijing)."},
+                "probe_mode": {
+                    "type": "string",
+                    "enum": ["single", "burst"],
+                    "default": "single",
+                    "description": "single=验活 Key；burst=诊断 CUQPS 并发上限（首次限流即停）。",
+                },
+            },
         },
     },
 }
@@ -465,6 +515,14 @@ def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(analyze_result, dict):
             return err("analyze_result must be an object")
         return ok(prepare_gov_web_search(analyze_result))
+    if name == "check_api_status":
+        return ok(
+            check_api_status(
+                lat=args.get("lat"),
+                lon=args.get("lon"),
+                probe_mode=str(args.get("probe_mode", "single")),
+            )
+        )
     return err(f"Unknown tool: {name}")
 
 
