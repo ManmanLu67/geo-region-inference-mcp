@@ -19,11 +19,12 @@ description: >-
 Skill 负责推理流程、证据优先级、置信度规则；MCP（`geo-region-inference` Server）负责
 几何计算、坐标处理、多数据源并发查询、结果预过滤与校验。架构原理、并发设计图示见 [README.md](README.md)。
 
-正常流程只调用 `analyze_regions` **一次**处理整批地物，不要逐地物或逐数据源单独调工具，
-不要执行 `python scripts/*.py`（已废弃，见 [scripts/README.md](scripts/README.md)）。
+正常流程只调用 `analyze_regions` **一次**处理整批地物，不要逐地物或逐数据源单独调工具。
+Skill 正常路径**不要**执行 `python scripts/*.py`；人工本地调试见 [scripts/README.md](scripts/README.md)。
 
 `calculate_geometry`、`search_project_evidence` **不是**默认链式步骤；仅在调试、单点补查或
-`analyze_regions` 无法完成时单独调用。
+`analyze_regions` 无法完成时单独调用。`calculate_geometry` 与 `analyze_regions` 共用几何校验
+（残余 Esri 扫描、fail-fast、`GEOMETRY_INVALID`），但不查在线源、不算检索半径。
 
 ```text
 analyze_regions(整批 GeoJSON/FeatureCollection 或 input_path)
@@ -40,10 +41,11 @@ validate_result
 不假设固定字段名——属性表可能几乎为空，也可能有专业代码字段。先识别地物数量和字段结构；
 若输入明显只有一个地物且字段一目了然，可直接处理。
 
-- **ArcGIS 用户**：优先导出标准 GeoJSON；若误传 Esri REST JSON（`rings`/`attributes`），MCP **v2.5+** 会尝试自动转换，有损时发 `GEOMETRY_SIMPLIFIED` 告警；无法转换时提示重新导出。
+- **ArcGIS 用户**：优先导出标准 GeoJSON；若误传 Esri REST JSON（`rings`/`attributes`），MCP 会尝试自动转换。合法多环保留孔洞；环角色无法判定或 paths 转线时发 `GEOMETRY_SIMPLIFIED`（看 `simplify_reasons`）；无法转换时提示重新导出。
 - **大文件/顶点多**：用 `input_path` 指向本地文件，不要把整份 JSON 贴进对话。
 - **SHP 输入**：先由宿主/文件工具转换为 GeoJSON，不要让 MCP 自己加载 GDAL/Fiona/
   GeoPandas；若宿主无法转换，如实告知这是输入层限制，不要在 Skill 里重新实现 GIS 解析栈。
+- **投影坐标无 CRS**：`|x|>180` 或 `|y|>90` 且未声明坐标系时 MCP **直接报错**，不要当 WGS84 硬算。
 
 ## 第二步：批量几何 + 在线证据
 
@@ -52,9 +54,10 @@ validate_result
 **向用户汇报前必读**：
 - `input_alerts` 含 `CRS_ASSUMED` → 提醒用户确认位置（文件未声明坐标系，已假定 WGS84）
 - `input_alerts` 含 **`GEOMETRY_INVALID`** → **必须**列出 `invalid_indices`（及 `invalid_reasons` 若存在），说明这些地物结果不完整，**不得**当作全量成功；`invalid_reasons` 含 `residual_esri_keys` 时提示 ArcGIS 导出标准 GeoJSON
-- `input_alerts` 含 **`GEOMETRY_SIMPLIFIED`** → **必须**列出 `feature_indices`，说明 Esri 转换可能使面积/形状偏大
+- `input_alerts` 含 **`GEOMETRY_SIMPLIFIED`** → **必须**列出 `feature_indices`；有 `simplify_reasons` 时按 reason 说明（`esri_ring_roles_unresolved` = 环角色无法判定已拆部件；`paths_converted` = 线要素转换），面积/形状可能不准确
+- 若 `analyze_regions` 或 `calculate_geometry` 抛出「invalid geometry … GEOMETRY_FAIL_RATIO」类 `ValueError`（无效占比默认 ≥0.5）→ **整批失败**，不要当部分成功；可拆出有效地物或调 `GEOMETRY_FAIL_RATIO` 后重跑
 - `online_summary.all_channels_unavailable=true` → 说明在线源不可用（缺 Key/网络），**不是**「此地无项目」
-- `online_summary.batch_retry_recommended=true` → **必须**建议拆分重跑（≤5 地物/批）或调低 `AMAP_QPS_LIMIT`；见 [error_codes.md](references/error_codes.md)
+- `online_summary.batch_retry_recommended=true` → **必须**建议拆分重跑（建议 ≤5 地物/批，这是重跑批量建议，与 `AMAP_BATCH_SIZE=5` 的 API 节流批大小不是同一概念）或调低 `AMAP_QPS_LIMIT`；见 [error_codes.md](references/error_codes.md)
 
 **flag 语义**：`search_projects=true`（默认）已用项目关键词检索 POI，`search_poi`
 **不会**叠加第二套泛搜；`search_poi=false` 关不掉项目检索；两者都 `false` 时不访问任何
@@ -84,21 +87,16 @@ validate_result
 在第二步返回**含行政区划**的证据后，对尚无 MCP 直接 `project_evidence` 的地物，调用
 `prepare_gov_web_search(analyze_result)`，MCP 返回**四轮** `search_plan`（街道核心词 →
 街道同义词 → 区级+道路交叉 → 纯地名/间接线索）。Agent 用 `web_search`/`web_fetch`
-按轮执行，不是 `scripts/` 脚本。详细 SOP 见
-[references/gov_web_search_guide.md](references/gov_web_search_guide.md)。
+按轮执行。详细 SOP 见 [references/gov_web_search_guide.md](references/gov_web_search_guide.md)。
 
 要点：
 - **宁可多搜，不可漏搜**：无公示也要判断是否**与本地块**匹配；查不到是常态，但要多轮尝试后再下结论
 - **分级推进**：本轮无 `.gov.cn` 命中 → 下一轮；**strong 匹配** → 停止后续轮次
-- 产出 `gov_web_notes`（含 `source_url`、`match: strong|weak`），写 `related_projects`
-  时对应填 `evidence_type`；政府强证据必填 `source_url`
-- `gov_publicity`（strong）可 >0.6；`gov_publicity_weak`（仅同区活动、未对应地块）≤0.3；
-  四轮均无 gov 强证据后用 `inferred`（≤0.4）
+- 产出 `gov_web_notes`（含 `source_url`、`match: strong|weak`），写 `related_projects` 时对应填 `evidence_type`
+- 置信度上限见 [output_schema.md](references/output_schema.md)：`gov_publicity` 须 `source_url`；`gov_publicity_weak` ≤0.3；`inferred` ≤0.4
 - 禁止把同一篇公示里所有项目都收进结果；禁止整段摘抄网页原文
 - 无 `web_search` 能力时跳过本步，在 evidence 中说明未做政府 Web 检索，**不是** pipeline 失败
-- 无 map 源或 `candidate_count=0` 时：从 properties/用户说明提取地址等线索自行
-  `web_search`，有支撑时 `data_source` 用 `hybrid`（场景 4），见
-  [references/output_schema.md](references/output_schema.md)
+- 无 map 源时从 properties/用户说明提取线索自行 `web_search`；`data_source` 场景 4 见 [output_schema.md](references/output_schema.md)
 
 ## 第四步：语义推理 —— 目标是 `related_projects`
 
@@ -131,8 +129,7 @@ validate_result
 严格按 [references/output_schema.md](references/output_schema.md) 组织结果，展示顺序固定为：
 **项目结论 → 项目直接证据 → 区域类型/建筑（推理依据）**。
 
-完成后对每个地物各调一次 `validate_result({"result": <单个对象>})`；失败按返回的 `errors` 修正后重试。不要执行
-`python scripts/validate_output.py`（已废弃）。
+完成后对每个地物各调一次 `validate_result({"result": <单个对象>})`；失败按返回的 `errors` 修正后重试。
 
 扬尘源台账等属性线索（如 `BH`/`SGQK`/`XZMC`/`Area`）见 [project_inference_signals.md](references/project_inference_signals.md)。
 
@@ -142,12 +139,6 @@ validate_result
 不要做成三个视觉上完全等价的栏目。间接推断要写明「推断」「具体名称未知」；多来源冲突要
 说明冲突，不要只挑一个隐藏分歧。
 
-## 性能与 MCP 宿主
-
-- 不要逐地物启动 Python 进程、不要逐数据源串行调 Tool、不要把 API 原始响应整包塞给 LLM
-- MCP Server 为常驻进程；将依赖安装到持久 `.venv` 并在 Host 配置中指向该 Python（见 [MCP_SETUP.md](MCP_SETUP.md)）
-
-## scripts/（已废弃）
-
-**正常 Skill 流程禁用。** 仅当 MCP 完全不可用且只需粗略几何时应急；`geo_stats.py` 质心与 MCP
-不同（顶点平均 vs 面积加权），勿与 MCP 结果对比。详见 [scripts/README.md](scripts/README.md)。
+**混合批次（同一 FeatureCollection、空间上可分成多簇）**：逐地物给 `related_projects`，
+不要把整批收成一个项目名。不同施工片区即使邻近也不合并。无直接 POI/公示证据的地物用
+`inferred`（≤0.4）写「具体项目名称未知」，不要借用邻块项目名。

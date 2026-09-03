@@ -1,112 +1,29 @@
 #!/usr/bin/env python3
 # DEPRECATED — 见 scripts/README.md
-# 警告：本脚本质心为顶点平均，MCP 为面积加权；lon/lat 可能与 MCP 系统性不同。
 """
 geo_stats.py — Compute deterministic geometric features from a GeoJSON-like
-input (FeatureCollection, single Feature, or bare geometry), so the AI never
-has to eyeball coordinates to estimate area/shape.
+input (FeatureCollection, single Feature, or bare geometry).
 
 Usage:
     python geo_stats.py <input.json>
     python geo_stats.py -   # read JSON from stdin
-
-Output (stdout, JSON):
-    A list of per-feature stats:
-    [
-      {
-        "index": 0,
-        "geometry_type": "Polygon",
-        "vertex_count": 42,
-        "centroid": {"lon": 113.xxx, "lat": 23.xxx},
-        "bbox": {"min_lon":..., "min_lat":..., "max_lon":..., "max_lat":...},
-        "area_m2": 12345.6,           # null for non-polygon geometries
-        "perimeter_m": 456.7,
-        "compactness": 0.42,          # 4*pi*area/perimeter^2, 1=circle, ->0=elongated
-        "bbox_width_m": ..., "bbox_height_m": ...,
-        "aspect_ratio": 2.3,          # long side / short side of bbox
-        "properties": {...}            # passed through unchanged
-      },
-      ...
-    ]
-
-Notes:
-- Area/perimeter use an equirectangular approximation around each feature's
-  own latitude (1 deg lat ~= 111320 m; 1 deg lon ~= 111320 * cos(lat) m).
-  This is accurate enough for classifying parcel scale/shape, NOT for legal
-  survey purposes.
-- Only the outer ring of Polygon/MultiPolygon is used for area/perimeter
-  (holes are ignored) — sufficient for shape classification.
-- If coordinates look like projected (non lon/lat) values (e.g. abs(x) > 180
-  or abs(y) > 90), the script skips the deg->m conversion and treats units
-  as already-metric, flagging "coordinate_system_warning" in the output.
 """
 import json
 import math
+import os
 import sys
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-def deg_to_m_factors(lat_deg):
-    lat_rad = math.radians(lat_deg)
-    m_per_deg_lat = 111320.0
-    m_per_deg_lon = 111320.0 * math.cos(lat_rad)
-    return m_per_deg_lon, m_per_deg_lat
-
-
-def ring_area_perimeter(ring, projected):
-    """Shoelace area + perimeter for a single ring of [x,y] pairs."""
-    if len(ring) < 3:
-        return 0.0, 0.0
-    if projected:
-        pts = ring
-    else:
-        # local equirectangular projection around ring's mean latitude
-        mean_lat = sum(p[1] for p in ring) / len(ring)
-        mx, my = deg_to_m_factors(mean_lat)
-        pts = [(p[0] * mx, p[1] * my) for p in ring]
-
-    area = 0.0
-    perim = 0.0
-    n = len(pts)
-    for i in range(n):
-        x1, y1 = pts[i]
-        x2, y2 = pts[(i + 1) % n]
-        area += x1 * y2 - x2 * y1
-        perim += math.hypot(x2 - x1, y2 - y1)
-    return abs(area) / 2.0, perim
-
-
-def flatten_coords(geom):
-    """Yield every [x, y] pair in a geometry, regardless of nesting depth."""
-    t = geom.get("type")
-    coords = geom.get("coordinates")
-    if t == "Point":
-        yield coords
-    elif t in ("MultiPoint", "LineString"):
-        for c in coords:
-            yield c
-    elif t == "MultiLineString" or t == "Polygon":
-        for part in coords:
-            for c in part:
-                yield c
-    elif t == "MultiPolygon":
-        for poly in coords:
-            for ring in poly:
-                for c in ring:
-                    yield c
-    elif t == "GeometryCollection":
-        for g in geom.get("geometries", []):
-            yield from flatten_coords(g)
-
-
-def outer_rings(geom):
-    """Return list of outer rings (list of [x,y]) for Polygon/MultiPolygon."""
-    t = geom.get("type")
-    if t == "Polygon":
-        coords = geom.get("coordinates", [])
-        return [coords[0]] if coords else []
-    if t == "MultiPolygon":
-        return [poly[0] for poly in geom.get("coordinates", []) if poly]
-    return []
+from geo_geometry import (  # noqa: E402
+    deg_to_m_factors,
+    flatten_coords,
+    polygon_parts,
+    ring_area_perimeter,
+    ring_centroid,
+)
 
 
 def compute_stats(geom, properties, index):
@@ -131,21 +48,43 @@ def compute_stats(geom, properties, index):
     short_side = max(min(bbox_width_m, bbox_height_m), 1e-9)
     aspect_ratio = round(long_side / short_side, 2)
 
-    rings = outer_rings(geom)
+    parts = polygon_parts(geom)
     area_m2 = None
     perimeter_m = None
     compactness = None
-    if rings:
-        total_area = 0.0
-        total_perim = 0.0
-        for ring in rings:
-            a, p = ring_area_perimeter(ring, projected)
-            total_area += a
-            total_perim += p
-        area_m2 = round(total_area, 1)
-        perimeter_m = round(total_perim, 1)
-        if total_perim > 0:
-            compactness = round((4 * math.pi * total_area) / (total_perim ** 2), 3)
+    if parts:
+        area_sum = 0.0
+        perim_sum = 0.0
+        num_lon = num_lat = weights = 0.0
+        fallback = None
+        for outer, holes in parts:
+            a_o, p_o = ring_area_perimeter(outer, projected=projected)
+            lon_o, lat_o, ra_o = ring_centroid(outer, projected=projected)
+            area_sum += a_o
+            perim_sum += p_o
+            w = ra_o if ra_o > 0 else a_o
+            num_lon += lon_o * w
+            num_lat += lat_o * w
+            weights += w
+            if fallback is None:
+                fallback = (lon_o, lat_o)
+            for h in holes:
+                a_h, _p_h = ring_area_perimeter(h, projected=projected)
+                lon_h, lat_h, ra_h = ring_centroid(h, projected=projected)
+                area_sum -= a_h
+                w_h = ra_h if ra_h > 0 else a_h
+                num_lon -= lon_h * w_h
+                num_lat -= lat_h * w_h
+                weights -= w_h
+        area_sum = max(area_sum, 0.0)
+        area_m2 = round(area_sum, 1)
+        perimeter_m = round(perim_sum, 1)
+        if perim_sum > 0 and area_sum > 0:
+            compactness = round((4 * math.pi * area_sum) / (perim_sum ** 2), 3)
+        if weights > 0:
+            centroid_lon, centroid_lat = num_lon / weights, num_lat / weights
+        elif fallback is not None:
+            centroid_lon, centroid_lat = fallback
 
     result = {
         "index": index,
@@ -177,10 +116,8 @@ def iter_features(data):
     elif isinstance(data, dict) and data.get("type") == "Feature":
         yield data.get("geometry", {}), data.get("properties", {}) or {}
     elif isinstance(data, dict) and "type" in data and "coordinates" in data:
-        # bare geometry
         yield data, {}
     elif isinstance(data, list):
-        # list of features or geometries
         for item in data:
             if item.get("type") == "Feature":
                 yield item.get("geometry", {}), item.get("properties", {}) or {}

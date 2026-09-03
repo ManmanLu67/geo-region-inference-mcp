@@ -26,9 +26,11 @@ from geo_clients import (
     overpass_query,
     overpass_query_batch,
     probe_api_status,
+    project_signal,
     query_amap,
     query_baidu,
     run_amap_baidu_job_batches,
+    apply_regeo_for_jobs,
 )
 from geo_geometry import feature_list, geometry_stats, radius_from_stats
 from geo_input import (
@@ -39,10 +41,9 @@ from geo_input import (
 )
 from gov_search import prepare_gov_web_search
 from validation import schema_data_source, validate_payload
+from version import SERVER_VERSION
 
 SERVER_NAME = "geo-region-inference"
-SERVER_VERSION = "2.5.1"
-
 _CHANNEL_RANK = {"ok": 4, "empty": 3, "error": 2, "unavailable": 1}
 MAX_FEATURES = 80
 PROTOCOL_VERSION = "2026-07-28"
@@ -73,10 +74,24 @@ def err(message: str, details: Any | None = None) -> dict[str, Any]:
     return json_result(payload, True)
 
 
-def project_signal(p: dict[str, Any]) -> bool:
-    s = " ".join(str(p.get(k) or "") for k in ("name", "type", "address", "businessarea", "description")).lower()
-    keywords = ("项目", "建设", "工程", "工地", "在建", "construction", "development", "project")
-    return any(k.lower() in s for k in keywords)
+def geometry_pipeline(feats: list[dict[str, Any]], input_alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shared stats + residual Esri scan + fail-fast + GEOMETRY_INVALID alerts."""
+    if len(feats) > MAX_FEATURES:
+        raise ValueError(f"feature_count {len(feats)} exceeds limit {MAX_FEATURES}")
+    stats = [geometry_stats(f, i) for i, f in enumerate(feats)]
+    structure_reasons = scan_residual_esri_geometry(feats)
+    validate_geometry_fail_fast(stats, len(feats), structure_reasons=structure_reasons)
+    input_alerts.extend(
+        build_geometry_invalid_alerts(stats, len(feats), structure_reasons=structure_reasons)
+    )
+    return stats
+
+
+def _source_lacks_project_evidence(src: dict[str, Any] | None, direct: list[dict[str, Any]]) -> bool:
+    if not src or src.get("status") == "unavailable":
+        return False
+    name = src.get("source")
+    return not any(x.get("source") == name for x in direct)
 
 
 def project_evidence_from_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -193,10 +208,11 @@ def assemble_feature_result(
     *,
     expanded_radius_used: bool,
     expanded_radius_found_project: bool,
+    project_evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     usable = [c for c in sources if c.get("status") == "ok"]
     source_names = [c.get("source") for c in usable]
-    direct = project_evidence_from_sources(sources)
+    direct = project_evidence if project_evidence is not None else project_evidence_from_sources(sources)
     return {
         "radius_m": radius,
         "expanded_radius_used": expanded_radius_used,
@@ -227,14 +243,7 @@ def analyze_regions(
     fc, input_meta = normalize_geo_input(geojson=geojson, input_path=input_path)
     input_alerts = list(input_meta.get("input_alerts") or [])
     feats = feature_list(fc)
-    if len(feats) > MAX_FEATURES:
-        raise ValueError(f"feature_count {len(feats)} exceeds limit {MAX_FEATURES}")
-    stats = [geometry_stats(f, i) for i, f in enumerate(feats)]
-    structure_reasons = scan_residual_esri_geometry(feats)
-    validate_geometry_fail_fast(stats, len(feats), structure_reasons=structure_reasons)
-    input_alerts.extend(
-        build_geometry_invalid_alerts(stats, len(feats), structure_reasons=structure_reasons)
-    )
+    stats = geometry_pipeline(feats, input_alerts)
     jobs: list[tuple[int, float, float, float]] = []
     for s in stats:
         if "centroid" not in s:
@@ -250,26 +259,45 @@ def analyze_regions(
     if want_net and jobs:
         amap_by, baidu_by = _amap_baidu_for_jobs(jobs, keywords, max_workers)
         osm_by = overpass_query_batch([(idx, lat, lon, radius) for idx, lat, lon, radius in jobs])
-        for idx, lat, lon, _radius in jobs:
-            amap_by[idx] = maybe_regeo_amap(amap_by[idx], lat, lon)
-            baidu_by[idx] = maybe_regeo_baidu(baidu_by[idx], lat, lon)
+        regeo_cache: dict[tuple[str, float, float], list[dict[str, Any]]] = {}
+        apply_regeo_for_jobs(jobs, amap_by, baidu_by, regeo_cache)
 
     pending: dict[int, dict[str, Any]] = {}
-    expand_jobs: list[tuple[int, float, float, float]] = []
+    expand_amap_jobs: list[tuple[int, float, float, float]] = []
+    expand_baidu_jobs: list[tuple[int, float, float, float]] = []
+    expand_osm_jobs: list[tuple[int, float, float, float]] = []
     for idx, lat, lon, radius in jobs:
         sources = [s for s in (amap_by.get(idx), baidu_by.get(idx), osm_by.get(idx)) if s]
         direct = project_evidence_from_sources(sources) if search_projects else []
-        need_expand = bool(expand_radius_if_needed and search_projects and not direct)
-        pending[idx] = {"sources": sources, "need_expand": need_expand}
-        if need_expand:
-            expand_jobs.append((idx, lat, lon, min(radius * EXPAND_RADIUS_FACTOR, EXPAND_RADIUS_MAX_M)))
+        want_expand = bool(expand_radius_if_needed and search_projects and not direct)
+        expanded_r = min(radius * EXPAND_RADIUS_FACTOR, EXPAND_RADIUS_MAX_M) if want_expand else None
+        do_amap = bool(want_expand and _source_lacks_project_evidence(amap_by.get(idx), direct))
+        do_baidu = bool(want_expand and _source_lacks_project_evidence(baidu_by.get(idx), direct))
+        do_osm = bool(want_expand and _source_lacks_project_evidence(osm_by.get(idx), direct))
+        need_expand = bool(do_amap or do_baidu or do_osm)
+        pending[idx] = {"sources": sources, "need_expand": need_expand, "direct": direct}
+        if need_expand and expanded_r is not None:
+            job = (idx, lat, lon, expanded_r)
+            if do_amap:
+                expand_amap_jobs.append(job)
+            if do_baidu:
+                expand_baidu_jobs.append(job)
+            if do_osm:
+                expand_osm_jobs.append(job)
 
     exp_amap: dict[int, dict[str, Any]] = {}
     exp_baidu: dict[int, dict[str, Any]] = {}
     exp_osm: dict[int, dict[str, Any]] = {}
-    if expand_jobs:
-        exp_amap, exp_baidu = _amap_baidu_for_jobs(expand_jobs, PROJECT_KEYWORDS, max_workers)
-        exp_osm = overpass_query_batch([(idx, lat, lon, r) for idx, lat, lon, r in expand_jobs])
+    if expand_amap_jobs or expand_baidu_jobs:
+        exp_amap, exp_baidu = run_amap_baidu_job_batches(
+            expand_amap_jobs or expand_baidu_jobs,
+            PROJECT_KEYWORDS,
+            max_workers,
+            query_amap_jobs=expand_amap_jobs,
+            query_baidu_jobs=expand_baidu_jobs,
+        )
+    if expand_osm_jobs:
+        exp_osm = overpass_query_batch([(idx, lat, lon, r) for idx, lat, lon, r in expand_osm_jobs])
 
     results: dict[int, dict[str, Any]] = {}
     for idx, _lat, _lon, radius in jobs:
@@ -293,6 +321,7 @@ def analyze_regions(
                 else:
                     merged.append(merge_source_records(base, extra, radius, expanded_r))
             sources = merged
+            direct = project_evidence_from_sources(sources)
         else:
             tagged = []
             for s in sources:
@@ -301,12 +330,13 @@ def analyze_regions(
                 rec["expanded_radius_m"] = None
                 tagged.append(rec)
             sources = tagged
-        direct = project_evidence_from_sources(sources) if search_projects else []
+            direct = info["direct"] if search_projects else project_evidence_from_sources(sources)
         results[idx] = assemble_feature_result(
             radius,
             sources,
             expanded_radius_used=expanded_used,
             expanded_radius_found_project=bool(expanded_used and direct),
+            project_evidence=direct,
         )
 
     merged_out = []
@@ -337,6 +367,23 @@ def analyze_regions(
     if want_net:
         out["online_summary"] = summarize_online_channels(merged_out)
     return out
+
+
+def calculate_geometry(
+    geojson: dict[str, Any] | None = None,
+    *,
+    input_path: str | None = None,
+) -> dict[str, Any]:
+    fc, input_meta = normalize_geo_input(geojson=geojson, input_path=input_path)
+    input_alerts = list(input_meta.get("input_alerts") or [])
+    feats = feature_list(fc)
+    stats = geometry_pipeline(feats, input_alerts)
+    return {
+        "feature_count": len(stats),
+        "input_meta": {k: v for k, v in input_meta.items() if k != "input_alerts"},
+        "input_alerts": input_alerts,
+        "features": stats,
+    }
 
 
 def validate_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -381,7 +428,7 @@ TOOLS = {
         },
     },
     "calculate_geometry": {
-        "description": "Compute deterministic geometry statistics for one Feature or a FeatureCollection without loading heavyweight GIS dependencies.",
+        "description": "Compute deterministic geometry statistics for one Feature or a FeatureCollection (shared scan/fail-fast/GEOMETRY_INVALID with analyze_regions; no POI).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -443,14 +490,6 @@ TOOLS = {
 }
 
 
-def _resolve_geo_args(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    geojson = args.get("geojson")
-    input_path = args.get("input_path")
-    if (geojson is None) == (input_path is None):
-        raise ValueError("Provide exactly one of geojson or input_path")
-    return normalize_geo_input(geojson=geojson, input_path=input_path)
-
-
 def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name == "analyze_regions":
         try:
@@ -472,17 +511,11 @@ def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             return err(str(e))
     if name == "calculate_geometry":
         try:
-            fc, input_meta = _resolve_geo_args(args)
-            features = feature_list(fc)
-            if len(features) > MAX_FEATURES:
-                return err(f"feature_count {len(features)} exceeds limit {MAX_FEATURES}")
             return ok(
-                {
-                    "feature_count": len(features),
-                    "input_meta": {k: v for k, v in input_meta.items() if k != "input_alerts"},
-                    "input_alerts": list(input_meta.get("input_alerts") or []),
-                    "features": [geometry_stats(f, i) for i, f in enumerate(features)],
-                }
+                calculate_geometry(
+                    geojson=args.get("geojson"),
+                    input_path=args.get("input_path"),
+                )
             )
         except ValueError as e:
             return err(str(e))
@@ -495,13 +528,18 @@ def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         direct = project_evidence_from_sources(sources)
         expanded_r = None
         if not direct and bool(args.get("expand_if_empty", True)):
-            expanded_r = min(radius * EXPAND_RADIUS_FACTOR, EXPAND_RADIUS_MAX_M)
-            sources = [
-                merge_source_records(amap, query_amap(lat, lon, expanded_r, PROJECT_KEYWORDS), radius, expanded_r),
-                merge_source_records(baidu, query_baidu(lat, lon, expanded_r, PROJECT_KEYWORDS), radius, expanded_r),
-                merge_source_records(osm, overpass_query(lat, lon, expanded_r), radius, expanded_r),
-            ]
-            direct = project_evidence_from_sources(sources)
+            expanded_cand = min(radius * EXPAND_RADIUS_FACTOR, EXPAND_RADIUS_MAX_M)
+            extra_amap = None if amap.get("status") == "unavailable" else query_amap(lat, lon, expanded_cand, PROJECT_KEYWORDS)
+            extra_baidu = None if baidu.get("status") == "unavailable" else query_baidu(lat, lon, expanded_cand, PROJECT_KEYWORDS)
+            extra_osm = None if osm.get("status") == "unavailable" else overpass_query(lat, lon, expanded_cand)
+            if extra_amap is not None or extra_baidu is not None or extra_osm is not None:
+                expanded_r = expanded_cand
+                sources = [
+                    merge_source_records(amap, extra_amap, radius, expanded_r),
+                    merge_source_records(baidu, extra_baidu, radius, expanded_r),
+                    merge_source_records(osm, extra_osm, radius, expanded_r),
+                ]
+                direct = project_evidence_from_sources(sources)
         return ok(
             {
                 "center": {"lat": lat, "lon": lon},

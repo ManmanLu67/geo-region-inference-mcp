@@ -1,6 +1,6 @@
 # 地图 API 数据源配置说明
 
-MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 fallback）。最终 `data_source` 见 [output_schema.md](output_schema.md)：单源 map 用 `amap`/`baidu`/`osm`，多源或 map+Web/离线组合用 `hybrid`；**仅**几何且无 Web 检索支撑项目结论时用 `offline`。无 map 源但输入属性线索 + Agent Web 检索支撑结论 → `hybrid`（场景 4）。`scripts/query_*.py` 已废弃，仅本地调试。
+MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 fallback）。最终 `data_source` 见 [output_schema.md](output_schema.md)：单源 map 用 `amap`/`baidu`/`osm`，多源或 map+Web/离线组合用 `hybrid`；**仅**几何且无 Web 检索支撑项目结论时用 `offline`。无 map 源但输入属性线索 + Agent Web 检索支撑结论 → `hybrid`（场景 4）。Skill 正常路径禁用 `scripts/`；人工本地调试见 [scripts/README.md](../scripts/README.md)。
 
 | 数据源 | 是否需要 Key | 国内覆盖 | 说明 |
 |---|---|---|---|
@@ -20,7 +20,7 @@ MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 f
    ```bash
    export AMAP_KEY=你的key
    ```
-5. 免费额度以控制台为准。MCP 每个地物：1 次 around，**仅当 around 没有省市区/地址时**再 1 次 regeo。
+5. 免费额度以控制台为准。MCP 每个地物逻辑上：1 次 around，**仅当 around 没有省市区/地址时**再 1 次 regeo；高德 regeo 在 `analyze_regions` 内按坐标去重后 **HTTP 可 `batch=true`（每批 ≤20，计 1 次 QPS）**，百度仍为单点。
 
 ### 百度地图（BAIDU_AK）
 
@@ -47,10 +47,6 @@ MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 f
 - 高德用 GCJ-02，百度用 BD-09，OSM/Overpass 用标准 WGS84
 - 转换在 `geo_clients.py` 内完成；传入 ArcGIS 导出的 WGS84 即可
 - **已废弃**：`scripts/coord_transform.py` 仅本地调试（见 [scripts/README.md](../scripts/README.md)）。坐标转换已在 `geo_clients.py` / MCP 内完成。
-  ```bash
-  python scripts/coord_transform.py wgs84_to_gcj02 <lon> <lat>
-  python scripts/coord_transform.py wgs84_to_bd09 <lon> <lat>
-  ```
 
 ## MCP 证据 Schema
 

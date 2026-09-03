@@ -39,6 +39,8 @@ geo-region-inference/
 ├── SKILL.md                         # Agent 工作流（执行推断读此）
 ├── README.md                        # 本文件：概览与文档地图
 ├── MCP_SETUP.md                     # 安装、Host 配置、stdio 启动
+├── version.py                       # SERVER_VERSION 单一事实源
+├── mcp_config.example.json          # Host 配置示例
 ├── mcp_server.py                    # MCP Server
 ├── geo_input.py                     # GeoJSON 加载、CRS、Esri 误传检测
 ├── geo_geometry.py                  # 权威几何统计
@@ -81,18 +83,9 @@ geo-region-inference/
 2. 配置 Host：指向 `.venv` 的 Python + `mcp_server.py`；`env` 注入 `AMAP_KEY` / `BAIDU_AK` 等（见 [map_api_setup.md](references/map_api_setup.md)）。
 3. Agent 按 [SKILL.md](SKILL.md) 执行：`analyze_regions` →（可选 gov Web）→ 推理 → `validate_result`。
 
-**输入**：GeoJSON / `input_path`；SHP 须宿主先转 GeoJSON；Esri REST JSON v2.5+ 可尝试自动转换（见 SKILL 第一步）。
+**输入**：GeoJSON / `input_path`；SHP 须宿主先转 GeoJSON；Esri REST JSON 可尝试自动转换（见 SKILL 第一步）。
 
-**MCP 工具一览**（细节见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)）：
-
-| 工具 | 用途 |
-|------|------|
-| `analyze_regions` | 主路径：几何 + 并发在线证据 |
-| `prepare_gov_web_search` | 四轮政府 Web 搜索计划（无 HTTP） |
-| `validate_result` | 最终 JSON 结构与置信度校验 |
-| `check_api_status` | 验活 Key / burst 诊断 CUQPS |
-| `calculate_geometry` | 调试：仅离线几何 |
-| `search_project_evidence` | 调试：单点项目检索 |
+**MCP 工具**：`analyze_regions`（主路径）、`prepare_gov_web_search`、`validate_result`、`check_api_status`，及调试工具 `calculate_geometry` / `search_project_evidence`。清单与参数见 [MCP_SETUP.md](MCP_SETUP.md#tool-contract) 与 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)。
 
 ---
 

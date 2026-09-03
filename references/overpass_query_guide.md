@@ -4,13 +4,13 @@
 
 **正常任务**：使用 MCP `analyze_regions`，OSM 查询由 `geo_clients.overpass_query_batch` 在服务端批量完成，Agent **不要**逐地物调用脚本或手写 Overpass QL。
 
-**本地调试**：`python scripts/query_overpass.py <lat> <lon> [radius_m]` 为 `geo_clients` 薄封装，HTTP 与解析逻辑在 `geo_clients.py`。
+**本地调试**（Skill 正常路径禁用）：`python scripts/query_overpass.py <lat> <lon> [radius_m]` 为 `geo_clients` 薄封装；见 [scripts/README.md](../scripts/README.md)。
 
 字段定义见 [mcp_evidence_schema.md](mcp_evidence_schema.md) 中 `sources[]`（`source=osm`）一节。
 
 ## 半径怎么选
 
-MCP 内置 `radius_from_stats()`（`analyze_regions` / `calculate_geometry` 共用），公式：
+MCP 内置 `radius_from_stats()`（由 `analyze_regions` 在主路径计算半径）。公式：
 
 ```
 radius_m = min(max(150, 0.6 * max(bbox_width_m, bbox_height_m)), 2500)
@@ -54,5 +54,5 @@ MCP 返回的 OSM source（或 CLI 脚本 stdout）中，以下字段重要性�
 
 | 路径 | 行为 |
 |------|------|
-| **MCP** | `sources[osm].status=error`，看 `reason_code`（`TIMEOUT` / `UPSTREAM_ERROR` / `INVALID_RESPONSE` / `DISABLED`）。`unavailable` 仅出现在被 `OSM_ENABLED=false` 关闭时（无 Key 要求）。不要空转重试同一批请求。 |
+| **MCP** | `sources[osm].status=error` 时看 `reason_code`（含 `HTTP_ERROR` / `TIMEOUT` / `UPSTREAM_ERROR` / `INVALID_RESPONSE`）。`OSM_ENABLED=false` 时为 `status=unavailable` + `reason_code=DISABLED`（无 Key 要求）。完整枚举见 [error_codes.md](error_codes.md)。不要空转重试同一批请求。 |
 | **CLI 脚本** | 网络失败时退出码 2；不要重试超过 1 次，直接转离线模式。 |

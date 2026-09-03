@@ -13,6 +13,8 @@ from typing import Any
 
 import httpx
 
+from version import SERVER_VERSION
+
 
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
@@ -38,6 +40,8 @@ OSM_ENABLED = os.environ.get("OSM_ENABLED", "true").strip().lower() not in (
 )
 BAIDU_DEFAULT_QUERY = "公司|住宅|写字楼|生活服务"
 PROJECT_KEYWORDS = os.environ.get("PROJECT_KEYWORDS", "在建|项目|工地|建设")
+_PROJECT_SIGNAL_EXTRA = ("工程", "construction", "development", "project")
+AMAP_REGEO_BATCH_SIZE = 20
 EXPAND_RADIUS_FACTOR = 2.5
 EXPAND_RADIUS_MAX_M = 5000.0
 AMAP_QPS_LIMIT = _env_float("AMAP_QPS_LIMIT", 3.0)
@@ -247,6 +251,23 @@ def has_admin_context(src: dict[str, Any] | None) -> bool:
     return False
 
 
+def project_signal_tokens() -> tuple[str, ...]:
+    seen: list[str] = []
+    for tok in PROJECT_KEYWORDS.split("|"):
+        t = tok.strip()
+        if t and t not in seen:
+            seen.append(t)
+    for extra in _PROJECT_SIGNAL_EXTRA:
+        if extra not in seen:
+            seen.append(extra)
+    return tuple(seen)
+
+
+def project_signal(p: dict[str, Any]) -> bool:
+    s = " ".join(str(p.get(k) or "") for k in ("name", "type", "address", "businessarea", "description")).lower()
+    return any(k.lower() in s for k in project_signal_tokens())
+
+
 class GeoHTTPClient:
     def __init__(self) -> None:
         self.counts = {"amap": 0, "baidu": 0, "overpass": 0, "total": 0}
@@ -254,7 +275,7 @@ class GeoHTTPClient:
         # set a default UA so all channels (Overpass/AMap/Baidu) are accepted.
         self.client = httpx.Client(
             timeout=httpx.Timeout(HTTP_TIMEOUT),
-            headers={"User-Agent": "geo-region-inference/2.1.0 (analysis)"},
+            headers={"User-Agent": f"geo-region-inference/{SERVER_VERSION} (analysis)"},
         )
 
     def reset_counts(self) -> None:
@@ -328,30 +349,65 @@ def run_amap_baidu_job_batches(
     jobs: list[tuple[int, float, float, float]],
     keywords: str | None,
     max_workers: int,
+    *,
+    query_amap_jobs: list[tuple[int, float, float, float]] | None = None,
+    query_baidu_jobs: list[tuple[int, float, float, float]] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
     """Run jobs in batches with optional inter-batch delay."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     amap_by: dict[int, dict[str, Any]] = {}
     baidu_by: dict[int, dict[str, Any]] = {}
-    if not jobs:
-        return amap_by, baidu_by
+    split = query_amap_jobs is not None or query_baidu_jobs is not None
+    amap_jobs = jobs if query_amap_jobs is None else query_amap_jobs
+    baidu_jobs = jobs if query_baidu_jobs is None else query_baidu_jobs
     workers = min(max(max_workers, 1), 4)
-    batch_size = max(AMAP_BATCH_SIZE, 1) if AMAP_BATCH_SIZE > 0 else len(jobs)
 
-    def one(job: tuple[int, float, float, float]):
+    if not split:
+        if not jobs:
+            return amap_by, baidu_by
+        batch_size = max(AMAP_BATCH_SIZE, 1) if AMAP_BATCH_SIZE > 0 else len(jobs)
+
+        def one(job: tuple[int, float, float, float]):
+            idx, lat, lon, radius = job
+            return idx, query_amap(lat, lon, radius, keywords), query_baidu(lat, lon, radius, keywords)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for start in range(0, len(jobs), batch_size):
+                chunk = jobs[start : start + batch_size]
+                futs = [pool.submit(one, job) for job in chunk]
+                for fut in as_completed(futs):
+                    idx, amap, baidu = fut.result()
+                    amap_by[idx] = amap
+                    baidu_by[idx] = baidu
+                if start + batch_size < len(jobs) and AMAP_BATCH_DELAY_MS > 0:
+                    time.sleep(AMAP_BATCH_DELAY_MS / 1000.0)
+        return amap_by, baidu_by
+
+    tasks: list[tuple[str, tuple[int, float, float, float]]] = (
+        [("amap", j) for j in amap_jobs] + [("baidu", j) for j in baidu_jobs]
+    )
+    if not tasks:
+        return amap_by, baidu_by
+    batch_size = max(AMAP_BATCH_SIZE, 1) if AMAP_BATCH_SIZE > 0 else len(tasks)
+
+    def one_split(kind: str, job: tuple[int, float, float, float]):
         idx, lat, lon, radius = job
-        return idx, query_amap(lat, lon, radius, keywords), query_baidu(lat, lon, radius, keywords)
+        if kind == "amap":
+            return kind, idx, query_amap(lat, lon, radius, keywords)
+        return kind, idx, query_baidu(lat, lon, radius, keywords)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for start in range(0, len(jobs), batch_size):
-            chunk = jobs[start : start + batch_size]
-            futs = [pool.submit(one, job) for job in chunk]
+        for start in range(0, len(tasks), batch_size):
+            chunk = tasks[start : start + batch_size]
+            futs = [pool.submit(one_split, kind, job) for kind, job in chunk]
             for fut in as_completed(futs):
-                idx, amap, baidu = fut.result()
-                amap_by[idx] = amap
-                baidu_by[idx] = baidu
-            if start + batch_size < len(jobs) and AMAP_BATCH_DELAY_MS > 0:
+                kind, idx, rec = fut.result()
+                if kind == "amap":
+                    amap_by[idx] = rec
+                else:
+                    baidu_by[idx] = rec
+            if start + batch_size < len(tasks) and AMAP_BATCH_DELAY_MS > 0:
                 time.sleep(AMAP_BATCH_DELAY_MS / 1000.0)
     return amap_by, baidu_by
 
@@ -538,7 +594,9 @@ def _summarize_overpass_elements(elements: list[dict[str, Any]]) -> dict[str, An
             roads.append({"name": name, "highway": tags["highway"]})
         if "place" in tags:
             places.append({"tag": f"place={tags['place']}", "name": name})
-        if tags.get("construction") or (name and any(w in name for w in ("在建", "项目", "建设", "工程", "工地"))):
+        if tags.get("construction") or (
+            name and any(w.lower() in name.lower() for w in project_signal_tokens())
+        ):
             project_signals.append({"name": name, "construction": tags.get("construction"), "description": tags.get("description")})
     nonempty = bool(landuse or building_types or amenities or project_signals)
     return {
@@ -686,46 +744,165 @@ def _baidu_places_from_regeo(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return places[:10]
 
 
-def maybe_regeo_amap(src: dict[str, Any], lat: float, lon: float) -> dict[str, Any]:
-    if src.get("status") in ("unavailable", "error") or has_admin_context(src):
+def _regeo_coord_key(provider: str, lat: float, lon: float) -> tuple[str, float, float]:
+    return (provider, round(float(lat), 6), round(float(lon), 6))
+
+
+def _merge_regeo_places(src: dict[str, Any], extra: list[dict[str, Any]]) -> dict[str, Any]:
+    if not extra:
         return src
+    out = dict(src)
+    out["places"] = (list(src.get("places") or []) + extra)[:10]
+    return out
+
+
+def _amap_regeo_payloads(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    items = raw.get("regeocodes")
+    if items is None:
+        items = raw.get("regeocode")
+    if isinstance(items, dict):
+        return [items]
+    if isinstance(items, list):
+        return [x for x in items if isinstance(x, dict)]
+    return []
+
+
+def _fetch_amap_regeo_places_single(lat: float, lon: float) -> list[dict[str, Any]]:
     key = os.environ.get("AMAP_KEY")
     if not key:
-        return src
+        return []
     gcj_lon, gcj_lat = wgs84_to_gcj02(lon, lat)
     params = {"key": key, "location": f"{gcj_lon},{gcj_lat}", "radius": "1000", "extensions": "all", "output": "json"}
     url = "https://restapi.amap.com/v3/geocode/regeo?" + urllib.parse.urlencode(params)
+    _AMAP_BUCKET.acquire()
     try:
         raw = get_http().request_json(url)
     except (TimeoutError, RateLimitError, httpx.HTTPError, json.JSONDecodeError):
-        return src
+        return []
     if not isinstance(raw, dict) or str(raw.get("status")) != "1":
+        return []
+    payloads = _amap_regeo_payloads(raw)
+    if not payloads:
+        return []
+    return _amap_places_from_regeo({"regeocode": payloads[0]})
+
+
+def _fetch_amap_regeo_places_batch(coords: list[tuple[float, float]]) -> list[list[dict[str, Any]]]:
+    empty = [[] for _ in coords]
+    if not coords:
+        return empty
+    key = os.environ.get("AMAP_KEY")
+    if not key:
+        return empty
+    locations = []
+    for lat, lon in coords:
+        gcj_lon, gcj_lat = wgs84_to_gcj02(lon, lat)
+        locations.append(f"{gcj_lon},{gcj_lat}")
+    params = {
+        "key": key,
+        "batch": "true",
+        "radius": "1000",
+        "extensions": "all",
+        "output": "json",
+    }
+    qs = urllib.parse.urlencode(params)
+    url = f"https://restapi.amap.com/v3/geocode/regeo?{qs}&location={'|'.join(locations)}"
+    _AMAP_BUCKET.acquire()
+    try:
+        raw = get_http().request_json(url)
+    except (TimeoutError, RateLimitError, httpx.HTTPError, json.JSONDecodeError):
+        return empty
+    if not isinstance(raw, dict) or str(raw.get("status")) != "1":
+        return empty
+    payloads = _amap_regeo_payloads(raw)
+    out: list[list[dict[str, Any]]] = []
+    for i in range(len(coords)):
+        if i < len(payloads):
+            out.append(_amap_places_from_regeo({"regeocode": payloads[i]}))
+        else:
+            out.append([])
+    return out
+
+
+def _fetch_baidu_regeo_places(lat: float, lon: float) -> list[dict[str, Any]]:
+    ak = os.environ.get("BAIDU_AK")
+    if not ak:
+        return []
+    bd_lon, bd_lat = wgs84_to_bd09(lon, lat)
+    params = {"ak": ak, "output": "json", "coordtype": "bd09ll", "location": f"{bd_lat:.6f},{bd_lon:.6f}"}
+    url = "https://api.map.baidu.com/reverse_geocoding/v3/?" + urllib.parse.urlencode(params)
+    _BAIDU_BUCKET.acquire()
+    try:
+        raw = get_http().request_json(url)
+    except (TimeoutError, RateLimitError, httpx.HTTPError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, dict) or raw.get("status") != 0:
+        return []
+    return _baidu_places_from_regeo(raw)
+
+
+def maybe_regeo_amap(src: dict[str, Any], lat: float, lon: float) -> dict[str, Any]:
+    if src.get("status") in ("unavailable", "error") or has_admin_context(src):
         return src
-    places = list(src.get("places") or []) + _amap_places_from_regeo(raw)
-    src = dict(src)
-    src["places"] = places[:10]
-    return src
+    if not os.environ.get("AMAP_KEY"):
+        return src
+    return _merge_regeo_places(src, _fetch_amap_regeo_places_single(lat, lon))
 
 
 def maybe_regeo_baidu(src: dict[str, Any], lat: float, lon: float) -> dict[str, Any]:
     if src.get("status") in ("unavailable", "error") or has_admin_context(src):
         return src
-    ak = os.environ.get("BAIDU_AK")
-    if not ak:
+    if not os.environ.get("BAIDU_AK"):
         return src
-    bd_lon, bd_lat = wgs84_to_bd09(lon, lat)
-    params = {"ak": ak, "output": "json", "coordtype": "bd09ll", "location": f"{bd_lat:.6f},{bd_lon:.6f}"}
-    url = "https://api.map.baidu.com/reverse_geocoding/v3/?" + urllib.parse.urlencode(params)
-    try:
-        raw = get_http().request_json(url)
-    except (TimeoutError, RateLimitError, httpx.HTTPError, json.JSONDecodeError):
-        return src
-    if not isinstance(raw, dict) or raw.get("status") != 0:
-        return src
-    places = list(src.get("places") or []) + _baidu_places_from_regeo(raw)
-    src = dict(src)
-    src["places"] = places[:10]
-    return src
+    return _merge_regeo_places(src, _fetch_baidu_regeo_places(lat, lon))
+
+
+def apply_regeo_for_jobs(
+    jobs: list[tuple[int, float, float, float]],
+    amap_by: dict[int, dict[str, Any]],
+    baidu_by: dict[int, dict[str, Any]],
+    cache: dict[tuple[str, float, float], list[dict[str, Any]]],
+) -> None:
+    amap_groups: dict[tuple[str, float, float], list[int]] = {}
+    amap_ll: dict[tuple[str, float, float], tuple[float, float]] = {}
+    baidu_groups: dict[tuple[str, float, float], list[int]] = {}
+    baidu_ll: dict[tuple[str, float, float], tuple[float, float]] = {}
+    amap_key = os.environ.get("AMAP_KEY")
+    baidu_key = os.environ.get("BAIDU_AK")
+    for idx, lat, lon, _radius in jobs:
+        src = amap_by.get(idx)
+        if src is not None and src.get("status") not in ("unavailable", "error") and not has_admin_context(src) and amap_key:
+            ck = _regeo_coord_key("amap", lat, lon)
+            if ck in cache:
+                amap_by[idx] = _merge_regeo_places(src, cache[ck])
+            else:
+                amap_groups.setdefault(ck, []).append(idx)
+                amap_ll[ck] = (lat, lon)
+        srcb = baidu_by.get(idx)
+        if srcb is not None and srcb.get("status") not in ("unavailable", "error") and not has_admin_context(srcb) and baidu_key:
+            ck = _regeo_coord_key("baidu", lat, lon)
+            if ck in cache:
+                baidu_by[idx] = _merge_regeo_places(srcb, cache[ck])
+            else:
+                baidu_groups.setdefault(ck, []).append(idx)
+                baidu_ll[ck] = (lat, lon)
+
+    keys = list(amap_groups.keys())
+    for start in range(0, len(keys), AMAP_REGEO_BATCH_SIZE):
+        chunk_keys = keys[start : start + AMAP_REGEO_BATCH_SIZE]
+        coords = [amap_ll[ck] for ck in chunk_keys]
+        extras = _fetch_amap_regeo_places_batch(coords)
+        for ck, extra in zip(chunk_keys, extras):
+            cache[ck] = extra
+            for idx in amap_groups[ck]:
+                amap_by[idx] = _merge_regeo_places(amap_by[idx], extra)
+
+    for ck, idxs in baidu_groups.items():
+        lat, lon = baidu_ll[ck]
+        extra = _fetch_baidu_regeo_places(lat, lon)
+        cache[ck] = extra
+        for idx in idxs:
+            baidu_by[idx] = _merge_regeo_places(baidu_by[idx], extra)
 
 
 def merge_source_records(base: dict[str, Any], expanded: dict[str, Any] | None, base_r: float, expanded_r: float | None) -> dict[str, Any]:

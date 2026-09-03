@@ -39,6 +39,7 @@ class CRSInfo:
 class EsriConvertMeta:
     converted: bool = False
     simplified_indices: list[int] = field(default_factory=list)
+    simplified_reasons: dict[int, list[str]] = field(default_factory=dict)
 
 
 def geometry_fail_ratio() -> float:
@@ -107,16 +108,22 @@ def _has_valid_geojson_coordinates(geom: dict[str, Any]) -> bool:
     return len(flat) > 0
 
 
-def _geometry_looks_esri(geom: dict[str, Any] | None) -> bool:
+def _has_esri_geometry_keys(geom: dict[str, Any] | None) -> bool:
     if not isinstance(geom, dict):
-        return False
-    if _has_valid_geojson_coordinates(geom):
         return False
     if "rings" in geom or "paths" in geom:
         return True
     if "x" in geom and "y" in geom:
         return True
     return False
+
+
+def _geometry_looks_esri(geom: dict[str, Any] | None) -> bool:
+    if not _has_esri_geometry_keys(geom):
+        return False
+    if _has_valid_geojson_coordinates(geom):
+        return False
+    return True
 
 
 def _looks_like_esri(payload: dict[str, Any]) -> bool:
@@ -136,11 +143,71 @@ def _looks_like_esri(payload: dict[str, Any]) -> bool:
             geom = feat.get("geometry")
             if isinstance(geom, dict) and _geometry_looks_esri(geom):
                 return True
-    if gtype == "FeatureCollection" and isinstance(feats, list):
-        for feat in feats:
-            if isinstance(feat, dict) and _geometry_looks_esri(feat.get("geometry")):
-                return True
     return False
+
+
+def _ring_signed_area(ring: list) -> float:
+    s = 0.0
+    n = len(ring)
+    if n < 2:
+        return 0.0
+    for i in range(n - 1):
+        x1, y1 = float(ring[i][0]), float(ring[i][1])
+        x2, y2 = float(ring[i + 1][0]), float(ring[i + 1][1])
+        s += x1 * y2 - x2 * y1
+    return s / 2.0
+
+
+def _ring_bbox(ring: list) -> tuple[float, float, float, float]:
+    xs = [float(p[0]) for p in ring]
+    ys = [float(p[1]) for p in ring]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _bbox_contains(outer: tuple[float, float, float, float], inner: tuple[float, float, float, float]) -> bool:
+    ominx, ominy, omaxx, omaxy = outer
+    iminx, iminy, imaxx, imaxy = inner
+    return iminx >= ominx and iminy >= ominy and imaxx <= omaxx and imaxy <= omaxy
+
+
+def _resolve_esri_rings(rings: list) -> tuple[list[tuple[list, list]], bool]:
+    """Esri ring roles: CW outer, CCW hole + bbox containment.
+
+    Returns (parts, unresolved). Unresolved → each ring is an independent part.
+    """
+    classified: list[tuple[list, bool, tuple[float, float, float, float]]] = []
+    for r in rings:
+        if not r:
+            continue
+        is_outer = _ring_signed_area(r) <= 0  # CW (or degenerate) = Esri exterior
+        classified.append((r, is_outer, _ring_bbox(r)))
+    if not classified:
+        return [], True
+
+    def _split_all() -> tuple[list[tuple[list, list]], bool]:
+        return [(r, []) for r, _, _ in classified], True
+
+    if not classified[0][1]:
+        return _split_all()
+
+    parts: list[tuple[list, list]] = []
+    current_outer: list | None = None
+    current_holes: list = []
+    current_bbox: tuple[float, float, float, float] | None = None
+    for r, is_outer, bbox in classified:
+        if is_outer:
+            if current_outer is not None:
+                parts.append((current_outer, current_holes))
+            current_outer = r
+            current_holes = []
+            current_bbox = bbox
+        else:
+            if current_outer is None or current_bbox is None or not _bbox_contains(current_bbox, bbox):
+                return _split_all()
+            current_holes.append(r)
+    if current_outer is not None:
+        parts.append((current_outer, current_holes))
+    return parts, False
 
 
 def _convert_esri_geometry(geom: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -153,12 +220,18 @@ def _convert_esri_geometry(geom: dict[str, Any]) -> tuple[dict[str, Any] | None,
         rings = geom.get("rings") or []
         if not rings:
             return None, []
-        if len(rings) > 1:
-            simplifications.append("dropped_inner_rings")
-        outer = rings[0]
-        if not outer:
+        parts, unresolved = _resolve_esri_rings(rings)
+        if not parts:
             return None, []
-        return {"type": "Polygon", "coordinates": [outer]}, simplifications
+        if unresolved:
+            simplifications.append("esri_ring_roles_unresolved")
+        if len(parts) == 1:
+            outer, holes = parts[0]
+            return {"type": "Polygon", "coordinates": [outer, *holes]}, simplifications
+        return {
+            "type": "MultiPolygon",
+            "coordinates": [[outer, *holes] for outer, holes in parts],
+        }, simplifications
     if "paths" in geom:
         paths = geom.get("paths") or []
         if not paths:
@@ -203,6 +276,7 @@ def try_convert_esri_to_geojson(payload: dict[str, Any]) -> tuple[dict[str, Any]
             return None, meta
         if simplifications:
             meta.simplified_indices.append(0)
+            meta.simplified_reasons.setdefault(0, []).extend(simplifications)
         meta.converted = True
         return {
             "type": "FeatureCollection",
@@ -230,6 +304,7 @@ def try_convert_esri_to_geojson(payload: dict[str, Any]) -> tuple[dict[str, Any]
             continue
         if simplifications:
             meta.simplified_indices.append(idx)
+            meta.simplified_reasons.setdefault(idx, []).extend(simplifications)
         converted_features.append({
             "type": "Feature",
             "properties": _feature_properties(feat),
@@ -408,23 +483,26 @@ def build_input_alerts(crs_meta: dict[str, Any], *, esri_meta: EsriConvertMeta |
     if crs_meta.get("crs_assumed"):
         alerts.append({"code": "CRS_ASSUMED", "severity": "warning", "user_message": CRS_ASSUMED_MESSAGE})
     if esri_meta and esri_meta.simplified_indices:
-        alerts.append({
+        alert: dict[str, Any] = {
             "code": "GEOMETRY_SIMPLIFIED",
             "severity": "warning",
             "feature_indices": list(esri_meta.simplified_indices),
             "user_message": GEOMETRY_SIMPLIFIED_MESSAGE,
-        })
+        }
+        if esri_meta.simplified_reasons:
+            alert["simplify_reasons"] = {
+                str(k): v for k, v in sorted(esri_meta.simplified_reasons.items())
+            }
+        alerts.append(alert)
     return alerts
 
 
 def _geometry_has_residual_esri_keys(geom: dict[str, Any] | None) -> bool:
-    if not isinstance(geom, dict):
+    if not _has_esri_geometry_keys(geom):
         return False
     if "rings" in geom or "paths" in geom:
         return True
-    if "x" in geom and "y" in geom and not _has_valid_geojson_coordinates(geom):
-        return True
-    return False
+    return not _has_valid_geojson_coordinates(geom)
 
 
 def scan_residual_esri_geometry(features: list[dict[str, Any]]) -> dict[int, str]:
@@ -559,14 +637,22 @@ def load_geo_input(*, geojson: dict[str, Any] | None = None, input_path: str | N
         load_meta["format_hint"] = "esri_converted"
         load_meta["esri_converted"] = True
     load_meta["esri_simplified_indices"] = list(esri_meta.simplified_indices)
+    load_meta["esri_simplified_reasons"] = {
+        str(k): list(v) for k, v in esri_meta.simplified_reasons.items()
+    }
     return payload, load_meta
 
 
 def normalize_geo_input(*, geojson: dict[str, Any] | None = None, input_path: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     payload, load_meta = load_geo_input(geojson=geojson, input_path=input_path)
+    raw_reasons = load_meta.get("esri_simplified_reasons") or {}
+    simplified_reasons: dict[int, list[str]] = {
+        int(k): list(v) for k, v in raw_reasons.items()
+    }
     esri_meta = EsriConvertMeta(
         converted=bool(load_meta.get("esri_converted")),
         simplified_indices=list(load_meta.get("esri_simplified_indices") or []),
+        simplified_reasons=simplified_reasons,
     )
     fc = to_feature_collection(payload)
     crs_info = extract_crs_info(payload, fc)

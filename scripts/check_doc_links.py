@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scan Markdown relative links and heading anchors (read-only doc audit)."""
+"""Scan Markdown relative links, heading anchors, and line endings (read-only doc audit)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,24 @@ def github_slug(text: str) -> str:
 def collect_anchors(path: Path) -> set[str]:
     text = path.read_text(encoding="utf-8")
     return {github_slug(m.group(2)) for m in HEADING_RE.finditer(text)}
+
+
+def scan_line_endings(md: Path) -> list[str]:
+    errors: list[str] = []
+    data = md.read_bytes()
+    for i in range(len(data) - 2):
+        if data[i : i + 3] == b"\r\r\n":
+            errors.append(
+                f"{md.relative_to(ROOT)}: malformed line ending \\r\\r\\n at byte {i}"
+            )
+            break
+    for i, byte in enumerate(data):
+        if byte == 0x0D and (i + 1 >= len(data) or data[i + 1] != 0x0A):
+            errors.append(
+                f"{md.relative_to(ROOT)}: lone carriage return at byte {i}"
+            )
+            break
+    return errors
 
 
 def scan_file(md: Path) -> list[str]:
@@ -52,15 +70,16 @@ def main() -> int:
     skip = {"SKILL.md"}  # plan scope: audit all md except SKILL optional; include SKILL for links
     all_errors: list[str] = []
     for md in sorted(ROOT.rglob("*.md")):
+        all_errors.extend(scan_line_endings(md))
         if md.name in skip:
             continue
         all_errors.extend(scan_file(md))
     if all_errors:
-        print("DOC LINK ERRORS:", len(all_errors))
+        print("DOC AUDIT ERRORS:", len(all_errors))
         for e in all_errors:
             print(" ", e)
         return 1
-    print("OK: all relative markdown links resolve")
+    print("OK: markdown links resolve and line endings are clean")
     return 0
 
 

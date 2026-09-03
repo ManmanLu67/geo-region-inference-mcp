@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import sys
 from typing import Any
 
 
@@ -34,26 +36,45 @@ def flatten_coords(geom: dict[str, Any]):
             yield from flatten_coords(g)
 
 
-def outer_rings(geom: dict[str, Any]) -> list[list[list[float]]]:
+def polygon_parts(geom: dict[str, Any]) -> list[tuple[list[list[float]], list[list[list[float]]]]]:
+    """RFC 7946 index semantics: coordinates[0] outer, [1:] holes. MultiPolygon per-part."""
     t = geom.get("type")
-    coords = geom.get("coordinates", [])
+    coords = geom.get("coordinates") or []
     if t == "Polygon" and coords:
-        return [coords[0]]
+        return [(coords[0], list(coords[1:]))]
     if t == "MultiPolygon":
-        return [poly[0] for poly in coords if poly]
+        return [(poly[0], list(poly[1:])) for poly in coords if poly]
     return []
 
 
-def _metric_ring(ring: list[list[float]]) -> list[tuple[float, float]]:
-    mean_lat = sum(float(p[1]) for p in ring) / len(ring)
-    mx, my = deg_to_m_factors(mean_lat)
-    return [(float(p[0]) * mx, float(p[1]) * my) for p in ring]
+def _local_metric_ring(ring: list[list[float]], *, projected: bool = False):
+    """米制坐标 + 平移到局部原点，返回 (局部坐标, 原点, 米制系数)。
+
+    经纬度直接乘 111320 后坐标量级约 1e7，shoelace 叉积项约 4e13，
+    而小地块（数十~数百 m²）的有效信号只有 1e2 量级 —— float64 的
+    2.2e-16 相对精度在累加中会被放大，导致质心偏移数十到数百米
+    （面积越小越严重，实测 110m² 地块偏 264m、114m² 偏 379m）。
+    平移到首顶点后，叉积项量级降到 1e4 左右，信号不再被淹没。
+
+    projected=True 时短路 deg_to_m_factors（投影坐标的 y 是北向米，不可当纬度求 cos）。
+    """
+    if projected:
+        mx, my = 1.0, 1.0
+        pts = [(float(p[0]), float(p[1])) for p in ring]
+    else:
+        mean_lat = sum(float(p[1]) for p in ring) / len(ring)
+        mx, my = deg_to_m_factors(mean_lat)
+        pts = [(float(p[0]) * mx, float(p[1]) * my) for p in ring]
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    ox, oy = pts[0]
+    return [(x - ox, y - oy) for x, y in pts], (ox, oy), (mx, my)
 
 
-def ring_area_perimeter(ring: list[list[float]]) -> tuple[float, float]:
+def ring_area_perimeter(ring: list[list[float]], *, projected: bool = False) -> tuple[float, float]:
     if len(ring) < 3:
         return 0.0, 0.0
-    pts = _metric_ring(ring)
+    pts, _origin, _factors = _local_metric_ring(ring, projected=projected)
     area2 = 0.0
     perim = 0.0
     for i, (x1, y1) in enumerate(pts):
@@ -63,12 +84,10 @@ def ring_area_perimeter(ring: list[list[float]]) -> tuple[float, float]:
     return abs(area2) / 2.0, perim
 
 
-def ring_centroid(ring: list[list[float]]) -> tuple[float, float, float]:
+def ring_centroid(ring: list[list[float]], *, projected: bool = False) -> tuple[float, float, float]:
     if len(ring) < 3:
         return float(ring[0][0]), float(ring[0][1]), 0.0
-    mean_lat = sum(float(p[1]) for p in ring) / len(ring)
-    mx, my = deg_to_m_factors(mean_lat)
-    pts = _metric_ring(ring)
+    pts, (ox, oy), (mx, my) = _local_metric_ring(ring, projected=projected)
     area2 = 0.0
     cx = cy = 0.0
     n = len(pts)
@@ -81,13 +100,42 @@ def ring_centroid(ring: list[list[float]]) -> tuple[float, float, float]:
         cy += (y1 + y2) * cross
     area = area2 / 2.0
     if abs(area) < 1e-12:
-        uniq = ring[:-1] if len(ring) > 1 and ring[0] == ring[-1] else ring
-        xs = [float(p[0]) for p in uniq]
-        ys = [float(p[1]) for p in uniq]
-        return sum(xs) / len(xs), sum(ys) / len(ys), 0.0
+        return sum(x for x, _ in pts) / n / mx + ox / mx, sum(y for _, y in pts) / n / my + oy / my, 0.0
     cx = cx / (6.0 * area)
     cy = cy / (6.0 * area)
-    return cx / mx, cy / my, abs(area)
+    return (cx + ox) / mx, (cy + oy) / my, abs(area)
+
+
+def _hole_debug_enabled() -> bool:
+    raw = os.environ.get("GEO_HOLE_DEBUG", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _hole_debug_ratio() -> float:
+    raw = os.environ.get("GEO_HOLE_DEBUG_RATIO", "").strip()
+    if raw:
+        return float(raw)
+    return 0.95
+
+
+def _maybe_log_holes(
+    index: int,
+    area_sum: float,
+    outer_area: float,
+    hole_count: int,
+    hole_perim: float,
+) -> None:
+    if not _hole_debug_enabled() or outer_area <= 0:
+        return
+    ratio = area_sum / outer_area
+    if ratio >= _hole_debug_ratio():
+        return
+    print(
+        f"[geo_geometry] hole-debug index={index} hole_count={hole_count} "
+        f"hole_perimeter_m={hole_perim:.1f} net/outer={ratio:.3f}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def compact_properties(props: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -122,25 +170,46 @@ def geometry_stats(feature: dict[str, Any], index: int) -> dict[str, Any]:
     short_side = max(min(width, height), 1e-9)
     aspect = long_side / short_side
     area = perim = compact = None
-    rings = outer_rings(geom)
+    parts = polygon_parts(geom)
     t = geom.get("type")
-    if rings:
+    if parts:
         area_sum = perim_sum = 0.0
-        cxs = cys = weights = 0.0
-        for ring in rings:
-            a, p = ring_area_perimeter(ring)
-            rlon, rlat, ra = ring_centroid(ring)
-            area_sum += a
-            perim_sum += p
-            w = ra if ra > 0 else a
-            cxs += rlon * w
-            cys += rlat * w
+        outer_area = 0.0
+        hole_perim = 0.0
+        hole_count = 0
+        num_lon = num_lat = weights = 0.0
+        fallback_cx = fallback_cy = None
+        for outer, holes in parts:
+            a_o, p_o = ring_area_perimeter(outer)
+            lon_o, lat_o, ra_o = ring_centroid(outer)
+            area_sum += a_o
+            outer_area += a_o
+            perim_sum += p_o
+            w = ra_o if ra_o > 0 else a_o
+            num_lon += lon_o * w
+            num_lat += lat_o * w
             weights += w
+            if fallback_cx is None:
+                fallback_cx, fallback_cy = lon_o, lat_o
+            for h in holes:
+                a_h, p_h = ring_area_perimeter(h)
+                lon_h, lat_h, ra_h = ring_centroid(h)
+                area_sum -= a_h
+                hole_perim += p_h
+                hole_count += 1
+                w_h = ra_h if ra_h > 0 else a_h
+                num_lon -= lon_h * w_h
+                num_lat -= lat_h * w_h
+                weights -= w_h
+        area_sum = max(area_sum, 0.0)
         area, perim = round(area_sum, 1), round(perim_sum, 1)
-        if perim_sum > 0:
+        if perim_sum > 0 and area_sum > 0:
             compact = round((4 * math.pi * area_sum) / (perim_sum**2), 3)
         if weights > 0:
-            cx, cy = cxs / weights, cys / weights
+            cx, cy = num_lon / weights, num_lat / weights
+        elif fallback_cx is not None:
+            cx, cy = fallback_cx, fallback_cy
+        _maybe_log_holes(index, area_sum, outer_area, hole_count, hole_perim)
     elif t in ("LineString", "MultiLineString", "MultiPoint"):
         uniq = pts[:-1] if len(pts) > 1 and pts[0] == pts[-1] else pts
         cx = sum(float(p[0]) for p in uniq) / len(uniq)
