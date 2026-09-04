@@ -67,12 +67,9 @@ def scan_file(md: Path) -> list[str]:
 
 
 def main() -> int:
-    skip = {"SKILL.md"}  # plan scope: audit all md except SKILL optional; include SKILL for links
     all_errors: list[str] = []
     for md in sorted(ROOT.rglob("*.md")):
         all_errors.extend(scan_line_endings(md))
-        if md.name in skip:
-            continue
         all_errors.extend(scan_file(md))
     if all_errors:
         print("DOC AUDIT ERRORS:", len(all_errors))

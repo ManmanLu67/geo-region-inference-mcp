@@ -39,14 +39,11 @@ candidate_count > 0 → 对每个 candidate 按轮检索
 
 对每个 candidate，**严格按 `search_plan.rounds` 顺序**执行，不要用 flat 列表一次性搜完。
 
-| 轮次 | name | 粒度 | 关键词策略 |
-|------|------|------|------------|
-| 1 | street_core | 街道（无街道则降级区县级） | 在建项目、重点建设项目公示、规划公示、土地出让公告 |
-| 2 | street_synonyms | 同 1 | 施工许可、规划许可批后公示、招标、环评、开工、竣工等 |
-| 3 | district_road_cross | **区/县** | 区级模板 + `{区} {道路名}` 交叉 |
-| 4 | place_indirect | **纯地名**（可选，见 JSON `enabled`） | `{路名} 项目/工地/施工单位`、两路交叉组合 |
-
-模板可在 [gov_search_templates.json](gov_search_templates.json) 配置扩展。
+四轮粒度逐级放宽：`street_core`、`street_synonyms` 为街道级（无街道则降级区县），
+`district_road_cross` 升到区/县级并与道路名交叉，`place_indirect` 退到纯地名兜底
+（可在 JSON 里用 `enabled` 关闭）。每轮的 `name`、`admin_level`、`queries` 由
+`prepare_gov_web_search` 直接返回，照用即可；模板可在
+[gov_search_templates.json](gov_search_templates.json) 配置扩展。
 
 ### 轮间推进规则
 

@@ -351,7 +351,8 @@ class GeoInputTests(unittest.TestCase):
         self.assertIn(0, alert["invalid_indices"])
         self.assertEqual(alert["invalid_reasons"]["0"], "residual_esri_keys")
         self.assertIn("Esri", alert["user_message"])
-        hybrid = json.loads(open(path, encoding="utf-8").read())["features"][0]
+        with open(path, encoding="utf-8") as f:
+            hybrid = json.load(f)["features"][0]
         fc_multi = {"type": "FeatureCollection", "features": [json.loads(json.dumps(SQUARE))] * 3 + [hybrid]}
         with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "0.5"}):
             out = mcp_server.analyze_regions(geojson=fc_multi, search_projects=False, search_poi=False)

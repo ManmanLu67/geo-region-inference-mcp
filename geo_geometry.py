@@ -106,6 +106,37 @@ def ring_centroid(ring: list[list[float]], *, projected: bool = False) -> tuple[
     return (cx + ox) / mx, (cy + oy) / my, abs(area)
 
 
+def ring_stats(ring: list[list[float]], *, projected: bool = False) -> tuple[float, float, float, float]:
+    """One pass over a ring: (area_m2, perimeter_m, centroid_lon, centroid_lat).
+
+    ring_area_perimeter + ring_centroid each re-project the ring via _local_metric_ring
+    and re-accumulate the same shoelace cross products; this walks the ring once.
+    """
+    if len(ring) < 3:
+        if not ring:
+            return 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, float(ring[0][0]), float(ring[0][1])
+    pts, (ox, oy), (mx, my) = _local_metric_ring(ring, projected=projected)
+    n = len(pts)
+    area2 = 0.0
+    perim = 0.0
+    cx = cy = 0.0
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        cross = x1 * y2 - x2 * y1
+        area2 += cross
+        cx += (x1 + x2) * cross
+        cy += (y1 + y2) * cross
+        perim += math.hypot(x2 - x1, y2 - y1)
+    area = area2 / 2.0
+    if abs(area) < 1e-12:
+        lon = sum(x for x, _ in pts) / n / mx + ox / mx
+        lat = sum(y for _, y in pts) / n / my + oy / my
+        return abs(area), perim, lon, lat
+    return abs(area), perim, (cx / (6.0 * area) + ox) / mx, (cy / (6.0 * area) + oy) / my
+
+
 def _hole_debug_enabled() -> bool:
     raw = os.environ.get("GEO_HOLE_DEBUG", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
@@ -180,27 +211,23 @@ def geometry_stats(feature: dict[str, Any], index: int) -> dict[str, Any]:
         num_lon = num_lat = weights = 0.0
         fallback_cx = fallback_cy = None
         for outer, holes in parts:
-            a_o, p_o = ring_area_perimeter(outer)
-            lon_o, lat_o, ra_o = ring_centroid(outer)
+            a_o, p_o, lon_o, lat_o = ring_stats(outer)
             area_sum += a_o
             outer_area += a_o
             perim_sum += p_o
-            w = ra_o if ra_o > 0 else a_o
-            num_lon += lon_o * w
-            num_lat += lat_o * w
-            weights += w
+            num_lon += lon_o * a_o
+            num_lat += lat_o * a_o
+            weights += a_o
             if fallback_cx is None:
                 fallback_cx, fallback_cy = lon_o, lat_o
             for h in holes:
-                a_h, p_h = ring_area_perimeter(h)
-                lon_h, lat_h, ra_h = ring_centroid(h)
+                a_h, p_h, lon_h, lat_h = ring_stats(h)
                 area_sum -= a_h
                 hole_perim += p_h
                 hole_count += 1
-                w_h = ra_h if ra_h > 0 else a_h
-                num_lon -= lon_h * w_h
-                num_lat -= lat_h * w_h
-                weights -= w_h
+                num_lon -= lon_h * a_h
+                num_lat -= lat_h * a_h
+                weights -= a_h
         area_sum = max(area_sum, 0.0)
         area, perim = round(area_sum, 1), round(perim_sum, 1)
         if perim_sum > 0 and area_sum > 0:
