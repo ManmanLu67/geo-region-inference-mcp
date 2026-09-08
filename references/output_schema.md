@@ -66,6 +66,7 @@
 4. 禁止无来源地虚构具体项目名称。
 5. `data_source` 要如实反映真正起作用的**地图/API 数据源**（见下）；政府 Web 证据通过 `related_projects[].evidence_type` 体现。无 map 源但输入线索 + Web 检索共同支撑结论时，用 `hybrid`（见第 4 种场景）。
 6. 不要把 MCP 的原始 API 响应或政府网页全文复制进最终结果；只保留支持结论所需的证据摘要。
+7. `source_url` 经 `validate_result` 通过 **不等于** 已呈现。发给用户的正文中，每条非空 `related_projects[].source_url` 必须写成可点击 Markdown 链接：方括号包 `label`，紧跟圆括号包 `source_url` 原值（不改写）。禁止只写「某某官网（日期）」这类无链接文字。无 `source_url` 的条目用纯文本 `label`，不要造链接。
 
 ## `data_source` 与 `hybrid`
 

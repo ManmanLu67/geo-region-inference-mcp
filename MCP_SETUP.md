@@ -48,7 +48,7 @@ python mcp_server.py
 
 Stdio transport; stays alive until the MCP host closes the connection.
 
-**修改 `geo_geometry.py` / `mcp_server.py` / `geo_input.py` 后必须重启 MCP 宿主**（stdio 常驻进程不热加载）。
+**修改 `geo_geometry.py` / `mcp_server.py` / `geo_input.py` / `geo_clients.py` / `gov_search.py` 后必须重启 MCP 宿主**（stdio 常驻进程不热加载）。重启后，若证据筛选规则（如 `project_evidence`）有变动，已产出但未定稿的结论须重新跑 `analyze_regions`（及后续 gov 检索/校验）再核验，**禁止直接沿用旧结果**。
 
 ## Configure keys and env
 

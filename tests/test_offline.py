@@ -571,6 +571,21 @@ class ValidationTests(unittest.TestCase):
         errors = collect_errors(result)
         self.assertTrue(any("confidence_reason" in e for e in errors))
 
+    def test_misplaced_project_in_possible_buildings(self):
+        result = _valid_result(possible_buildings=[{
+            "label": "XX花园二期建设项目",
+            "confidence": 0.8,
+            "evidence": "MCP POI",
+            "evidence_type": "poi_name",
+            "source_url": "https://uri.amap.com/poidetail?poiid=B000AAFAC5",
+        }])
+        errors = collect_errors(result)
+        self.assertTrue(any("疑似 related_projects 对象误放入 possible_buildings" in e for e in errors))
+        self.assertFalse(any("missing keys" in e for e in errors))
+
+    def test_normal_building_candidate_passes(self):
+        self.assertEqual(collect_errors(_valid_result()), [])
+
 
 class GovSearchTests(unittest.TestCase):
     def _feature(self, *, project_evidence=None, places=None, roads=None, index=0):

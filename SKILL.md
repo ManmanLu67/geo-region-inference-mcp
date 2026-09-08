@@ -16,27 +16,20 @@ description: >-
 
 ## 全局硬约束
 
-以下规则贯穿全程，任何一步都成立。几何计算、坐标处理、多源查询与校验一律交给 MCP，
-Skill 只做推理流程、证据分级与置信度判断。
+以下规则贯穿全程，任何一步都成立。几何计算、坐标处理、多源查询与校验一律交给 MCP，Skill 只做推理流程、证据分级与置信度判断。
 
 **工具边界**
-- `calculate_geometry`、`search_project_evidence` **不是**默认链式步骤；仅在调试、单点补查或
-  `analyze_regions` 无法完成时单独调用。
-- `calculate_geometry` 与 `analyze_regions` 共用同一套几何校验（残余 Esri 扫描、fail-fast、
-  `GEOMETRY_INVALID`），单独调它复现同样的报错属预期，不是新问题。
-- Skill 正常路径**不要**执行 `python scripts/*.py`。
+- `calculate_geometry`、`search_project_evidence` **不是**默认链式步骤；仅在调试、单点补查或 `analyze_regions` 无法完成时单独调用。
+- `calculate_geometry` 与 `analyze_regions` 共用同一套几何校验（残余 Esri 扫描、fail-fast、 `GEOMETRY_INVALID`），单独调它复现同样的报错属预期，不是新问题。
+- Skill 正常路径**不要**执行 `python scripts/*.py`
 
 **结论与置信度**
-- 每条 `related_projects` **必须**填 `evidence_type` 与 `confidence_reason`；`region_type` /
-  `possible_buildings` 同样必填 `confidence_reason`。校验读这些字段，不从 evidence 文本猜。
-- `poi_name` **必须**有可点击 `source_url`（优先抄 MCP `project_evidence[].page_url`）；没有地图
-  详情页链接则不得用 `poi_name` 报高置信。
-- `gov_publicity` 须 `source_url`（官方公示页）。地图 POI 页不是官方立项页，呈现时须说明。
-- 没有直接项目线索时 `confidence` **不得超过 0.4**，且须用 `supported_by` 指向具体的
-  `region_type` / `possible_buildings` 候选。
+- 每条 `related_projects` **必须**填 `evidence_type` 与 `confidence_reason`；`region_type` / `possible_buildings` 同样必填 `confidence_reason`。校验读这些字段，不从 evidence 文本猜。
+- `poi_name` **必须**有可点击 `source_url`（优先抄 MCP `project_evidence[].page_url`）；没有地图详情页链接则不得用 `poi_name` 报高置信。
+- `gov_publicity` 须 `source_url`（官方公示页）。
+- 没有直接项目线索时 `confidence` **不得超过 0.4**，且须用 `supported_by` 指向具体的 `region_type` / `possible_buildings` 候选。
 - 即使 `region_type` 置信度很高，也不能因此提高具体项目名称的置信度。
-- 没有来源支持时**禁止编造**具体项目名：写「住宅类建设项目，具体名称未知」这类类型化描述，
-  并明确标注为「推断」。
+- 没有来源支持时**禁止编造**具体项目名：写「住宅类建设项目，具体名称未知」这类类型化描述，并明确标注为「推断」。
 - 信息少时宁可只给 1 条可靠候选，不要为凑数量制造弱证据。
 - 多个来源明显矛盾时，不要只选「看起来更像」的一个，把冲突保留进 evidence 并在汇报时说明。
 
@@ -47,17 +40,13 @@ Skill 只做推理流程、证据分级与置信度判断。
 
 - **ArcGIS 用户**：优先导出标准 GeoJSON；若误传 Esri REST JSON（`rings`/`attributes`），MCP 会尝试自动转换（合法多环保留孔洞），无法转换时提示重新导出。
 - **大文件/顶点多**：用 `input_path` 指向本地文件，不要把整份 JSON 贴进对话。
-- **大批量输出**：`analyze_regions` 加 `output_path`（`.json`，父目录须已存在）。工具只返回摘要
-  （`output_written: true`）；第三步必须用 `analyze_result_path` 指向该文件，**禁止**把摘要当
-  `analyze_result` 传入（会硬失败，不是「无行政区」）。
-- **SHP 输入**：须先由宿主/文件工具转成 GeoJSON；宿主无法转换时如实告知这是输入层限制，
-  不要在 Skill 里重新实现 GIS 解析栈。
+- **大批量输出**：`analyze_regions` 加 `output_path`（`.json`，父目录须已存在）。工具只返回摘要 （`output_written: true`）；第三步必须用 `analyze_result_path` 指向该文件，**禁止**把摘要当 `analyze_result` 传入（会硬失败，不是「无行政区」）。
+- **SHP 输入**：须先由宿主/文件工具转成 GeoJSON；宿主无法转换时如实告知这是输入层限制，不要在 Skill 里重新实现 GIS 解析栈。
 - **投影坐标无 CRS**：`|x|>180` 或 `|y|>90` 且未声明坐标系时 MCP **直接报错**，不要当 WGS84 硬算。
 
 ## 第二步：批量几何 + 在线证据
 
-调用 `analyze_regions`，传入整个 FeatureCollection 或 `input_path`，**一次**处理整批——
-不要逐地物、也不要逐数据源单独调工具。
+调用 `analyze_regions`，传入整个 FeatureCollection 或 `input_path`，**一次**处理整批——不要逐地物、也不要逐数据源单独调工具。
 
 **`input_alerts` / `online_summary` 处置**（这些结论必须带进第五步的汇报）：
 - `CRS_ASSUMED` → 提醒用户确认位置（文件未声明坐标系，已假定 WGS84）
@@ -74,11 +63,9 @@ Skill 只做推理流程、证据分级与置信度判断。
 - `error` + `RATE_LIMIT`/`TIMEOUT` → 服务端已退避，不必立即重试；是否分批看上面的 `batch_retry_recommended`
 - `empty` → 接口成功但附近无结果，属正常情况
 
-**flag 语义**：`search_projects=true`（默认）已用项目关键词检索 POI；`search_poi` 不叠加
-第二套泛搜，也关不掉项目检索；两者都 `false` 时不访问任何在线源。
+**flag 语义**：`search_projects=true`（默认）已用项目关键词检索 POI；`search_poi` 不叠加第二套泛搜，也关不掉项目检索；两者都 `false` 时不访问任何在线源。
 
-无直接项目证据时该工具会自动扩圈补查一次；**扩大范围查到的普通 POI 不能直接当作目标地块
-本身的证据**（定级见第四步）。返回字段定义见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)。
+无直接项目证据时该工具会自动扩圈补查一次；**扩大范围查到的普通 POI 不能直接当作目标地块本身的证据**（定级见第四步）。返回字段定义见 [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md)。
 
 大批量（如 >10 地物）前可调用 **`check_api_status(probe_mode=burst)`** 诊断并发限流——**仅探测高德**，
 百度在该模式下仍只做验活，不要据此声称已诊断全部数据源；`single` 模式仅验活 Key。
@@ -86,10 +73,8 @@ Skill 只做推理流程、证据分级与置信度判断。
 ## 第三步：政府公示 Web 检索（可选）
 
 在第二步返回**含行政区划**的证据后，对尚无 MCP 直接 `project_evidence` 的地物，调用
-`prepare_gov_web_search`：有 `output_path` 时传 `analyze_result_path`，否则传完整
-`analyze_result`。MCP 返回**四轮** `search_plan`（街道核心词 →
-街道同义词 → 区级+道路交叉 → 纯地名/间接线索）。Agent 用 `web_search`/`web_fetch`
-按轮执行。详细 SOP 见 [references/gov_web_search_guide.md](references/gov_web_search_guide.md)。
+`prepare_gov_web_search`：有 `output_path` 时传 `analyze_result_path`，否则传完整 `analyze_result`。MCP 返回**四轮** `search_plan`（街道核心词 →
+街道同义词 → 区级+道路交叉 → 纯地名/间接线索）。Agent 用 `web_search`/`web_fetch` 按轮执行。详细 SOP 见 [references/gov_web_search_guide.md](references/gov_web_search_guide.md)。
 
 要点：
 - **宁可多搜，不可漏搜**：无公示也要判断是否**与本地块**匹配；查不到是常态，但要多轮尝试后再下结论
@@ -105,7 +90,7 @@ Skill 只做推理流程、证据分级与置信度判断。
 
 | 优先级 | 证据 | `evidence_type` | 置信度上限 |
 |---|---|---|---|
-| 1 | POI 名称 / 属性字段 / 政府公示直接给出项目名 | `poi_name` / `attribute_field` / `gov_publicity` | 可 >0.6（`poi_name`/`gov_publicity` 须 `source_url`） |
+| 1 | POI 名称 / 属性字段 / 政府公示直接给出项目名 | `poi_name` / `attribute_field` / `gov_publicity` | 可 >0.6 |
 | 2 | 明确的项目/规划/备案编号 | `project_number` | 可 >0.6 |
 | 3 | 名称 +「在建/建设中/工地」等状态组合 | `poi_name`（含状态修饰） | 视完整度而定 |
 | 4 | `construction=*` 等直接建设标签 | `attribute_field` | 中等 |
@@ -116,19 +101,27 @@ Skill 只做推理流程、证据分级与置信度判断。
 第二步扩圈补查到的普通 POI 不是本地块的直接证据，**不得**按第 1 级定级。
 
 `region_type`/`possible_buildings` 不追求独立的高精度。分类词汇见
-[references/landuse_taxonomy.md](references/landuse_taxonomy.md)；项目线索与扬尘源台账类
-属性字段（`BH`/`SGQK`/`XZMC`/`Area`）见 [references/project_inference_signals.md](references/project_inference_signals.md)。
+[references/landuse_taxonomy.md](references/landuse_taxonomy.md)；项目线索与扬尘源台账类属性字段（`BH`/`SGQK`/`XZMC`/`Area`）见 [references/project_inference_signals.md](references/project_inference_signals.md)。
 
 ## 第五步：输出、校验与呈现
 
-严格按 [references/output_schema.md](references/output_schema.md) 组织结果。每个地物一组，
-展示顺序固定为**项目结论 → 项目直接证据 → 区域类型/建筑（推理依据）**——不要做成三个视觉上
-完全等价的栏目。
+严格按 [references/output_schema.md](references/output_schema.md) 组织结果。
+
+组装 JSON 前：`related_projects` / `region_type` / `possible_buildings` 是三个平级顶层键，禁止把项目结论塞进 `possible_buildings[]`；`evidence` 与 `confidence_reason` 不接受空串（缺内容就删该条或改成诚实的「未知」候选，不要占位）。
+
+每个地物一组，展示顺序固定为**项目结论 → 项目直接证据 → 区域类型/建筑（推理依据）**——不要做成三个视觉上完全等价的栏目。
 
 完成后对每个地物各调一次 `validate_result({"result": <单个对象>})`；失败按返回的 `errors` 修正后重试。
 
-向用户呈现时：项目名后给出**可点击** `source_url`；读出 `confidence_reason`，不要只甩分数。
-仅有地图 POI 页、无官方公示时，须说明「链接为地图详情页，非官方立项页」。
+校验通过后，从该 JSON **模板化**生成发给用户的 Markdown，禁止凭记忆重写项目名和链接（`source_url` 校验通过 ≠ 已呈现，见 [output_schema.md](references/output_schema.md#硬性规则)）：
+
+- 有 `source_url`：必须写成 Markdown 链接——方括号包 `label`，紧跟圆括号包 `source_url` 原值（不改写、不省略 scheme）。禁止只写「某某官网（日期）」。
+- 无 `source_url`（如 `inferred`）：纯文本 `label`，不要造链接。
+- 读出 `confidence_reason`，不要只甩分数。
+- 仅有地图 POI 页、无官方公示时，须说明「链接为地图详情页，非官方立项页」。
+
+发出前自查：每条非空 `related_projects[i].source_url` 必须以 `](该URL)` 出现在即将发出的文本中；
+缺一条就补，不要发。
 
 汇报时**必须**带上第二步 `input_alerts` / `online_summary` 的处置结论（无效几何、简化告警、
 在线源不可用、建议拆分重跑），不得只报成功部分。

@@ -14,6 +14,7 @@ REQUIRED_TOP_KEYS = {
 }
 REQUIRED_CANDIDATE_KEYS = {"label", "confidence", "evidence", "confidence_reason"}
 REQUIRED_PROJECT_KEYS = {"label", "confidence", "evidence", "evidence_type", "confidence_reason"}
+PROJECT_ONLY_KEYS = {"evidence_type", "source_url", "supported_by"}
 VALID_DATA_SOURCES = {"amap", "baidu", "osm", "offline", "hybrid"}
 
 VALID_EVIDENCE_TYPES = {
@@ -113,6 +114,9 @@ def _check_candidate_list(name: str, items: Any, errors: list[str]) -> None:
     for i, item in enumerate(items):
         if not isinstance(item, dict):
             errors.append(f"{name}[{i}] must be an object")
+            continue
+        if name != "related_projects" and PROJECT_ONLY_KEYS & item.keys():
+            errors.append(f"{name}[{i}] 疑似 related_projects 对象误放入 {name}")
             continue
         missing = required - item.keys()
         if missing:
