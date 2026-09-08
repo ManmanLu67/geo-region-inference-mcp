@@ -14,7 +14,8 @@
     {
       "label": "住宅小区",
       "confidence": 0.72,
-      "evidence": "landuse_code=R2；MCP 返回 OSM 周边有 apartments 建筑"
+      "evidence": "landuse_code=R2；MCP 返回 OSM 周边有 apartments 建筑",
+      "confidence_reason": "属性与 OSM building=apartments 互相印证"
     }
   ],
 
@@ -22,7 +23,8 @@
     {
       "label": "多层住宅楼",
       "confidence": 0.70,
-      "evidence": "MCP 返回 building=apartments"
+      "evidence": "MCP 返回 building=apartments",
+      "confidence_reason": "OSM 建筑标签直接对应"
     }
   ],
 
@@ -32,13 +34,15 @@
       "confidence": 0.80,
       "evidence_type": "poi_name",
       "evidence": "MCP 查询到 POI name=XX花园二期建设项目",
-      "source_url": null
+      "confidence_reason": "高德 POI 名称直接给出项目名；链接为地图详情页，非官方立项页",
+      "source_url": "https://uri.amap.com/poidetail?poiid=B000AAFAC5"
     },
     {
       "label": "XX路以东地块住宅项目",
       "confidence": 0.75,
       "evidence_type": "gov_publicity",
       "evidence": "区自然资源局规划公示（转述）：该地块拟建住宅……",
+      "confidence_reason": "公示道路与地块可对应",
       "source_url": "https://xx.gov.cn/...",
       "publicity_date": "2024-06-15"
     },
@@ -47,6 +51,7 @@
       "confidence": 0.40,
       "evidence_type": "inferred",
       "evidence": "四轮政府 Web 检索无强匹配；根据区域和建筑证据推断",
+      "confidence_reason": "无直接项目名，按 inferred 上限",
       "supported_by": "region_type[0] 住宅小区 + possible_buildings[0] 多层住宅楼"
     }
   ]
@@ -57,7 +62,7 @@
 
 1. 每个候选列表至少 1 条，不能为空。
 2. `confidence` 必须位于 0–1，并按降序排列（允许相等）。
-3. `evidence` 必须具体、可追溯，说明属性字段、MCP 数据源、POI 名称、OSM 标签、政府公示或几何特征。
+3. `evidence` 必须具体、可追溯；每条候选必须有 `confidence_reason`。
 4. 禁止无来源地虚构具体项目名称。
 5. `data_source` 要如实反映真正起作用的**地图/API 数据源**（见下）；政府 Web 证据通过 `related_projects[].evidence_type` 体现。无 map 源但输入线索 + Web 检索共同支撑结论时，用 `hybrid`（见第 4 种场景）。
 6. 不要把 MCP 的原始 API 响应或政府网页全文复制进最终结果；只保留支持结论所需的证据摘要。
@@ -87,12 +92,13 @@
 | `confidence` | 0–1 |
 | `evidence` | 可追溯摘要（转述，非全文摘抄） |
 | `evidence_type` | 显式证据类型（见下表） |
+| `confidence_reason` | 为何是这个分数（对应哪条 MCP/公示证据）；`region_type` / `possible_buildings` 同样必填 |
 
 ### 可选字段
 
 | 字段 | 说明 |
 |------|------|
-| `source_url` | `gov_publicity` **必填**；`gov_publicity_weak` 建议填 |
+| `source_url` | `gov_publicity` 与 `poi_name` **必填**（http/https）；`gov_publicity_weak` 建议填。`poi_name` 优先抄 MCP `page_url` |
 | `publicity_date` | 政府公示日期，建议填写 |
 | `supported_by` | `evidence_type=inferred` **必填** |
 
@@ -102,7 +108,7 @@
 |---------------|------|-----------------|
 | `gov_publicity` | 政府公示 + 地址/道路可对应本地块 | 可 >0.6；须 `source_url` |
 | `gov_publicity_weak` | 仅确认同区域有建设活动，未能对应本地块 | **≤0.3** |
-| `poi_name` | 地图 POI 直接项目名 | 可 >0.6 |
+| `poi_name` | 地图 POI 直接项目名 | 可 >0.6；须 `source_url`（地图详情页） |
 | `attribute_field` | 属性表项目名/编号/许可 | 可 >0.6 |
 | `project_number` | 明确项目/规划/备案编号 | 可 >0.6 |
 | `inferred` | 由 region_type + possible_buildings 间接推断 | **≤0.4**；须 `supported_by` |

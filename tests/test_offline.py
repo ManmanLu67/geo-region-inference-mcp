@@ -64,13 +64,25 @@ def _valid_result(**overrides):
     base = {
         "feature_index": 0,
         "data_source": "hybrid",
-        "region_type": [{"label": "住宅小区", "confidence": 0.7, "evidence": "landuse=R2"}],
-        "possible_buildings": [{"label": "多层住宅楼", "confidence": 0.6, "evidence": "building=apartments"}],
+        "region_type": [{
+            "label": "住宅小区",
+            "confidence": 0.7,
+            "evidence": "landuse=R2",
+            "confidence_reason": "属性 landuse=R2 与 OSM apartments 一致",
+        }],
+        "possible_buildings": [{
+            "label": "多层住宅楼",
+            "confidence": 0.6,
+            "evidence": "building=apartments",
+            "confidence_reason": "MCP 返回 building=apartments",
+        }],
         "related_projects": [{
             "label": "XX花园二期建设项目",
             "confidence": 0.8,
             "evidence": "MCP 查询到 POI name=XX花园二期建设项目",
             "evidence_type": "poi_name",
+            "confidence_reason": "高德 POI 名称直接给出项目名",
+            "source_url": "https://uri.amap.com/poidetail?poiid=B000AAFAC5",
         }],
     }
     base.update(overrides)
@@ -479,6 +491,7 @@ class ValidationTests(unittest.TestCase):
             "confidence": 0.4,
             "evidence": "未发现直接项目名称，只能根据区域和建筑证据推断",
             "evidence_type": "inferred",
+            "confidence_reason": "无直接项目名，按 inferred 上限 0.4",
         }])
         errors = collect_errors(result)
         self.assertTrue(any("supported_by" in e for e in errors))
@@ -490,6 +503,7 @@ class ValidationTests(unittest.TestCase):
             "evidence": "看起来像住宅区",
             "evidence_type": "inferred",
             "supported_by": "region_type[0]",
+            "confidence_reason": "仅区域类型，不应给高分",
         }])
         errors = collect_errors(result)
         self.assertTrue(any("0.6" in e or "0.4" in e for e in errors))
@@ -500,6 +514,7 @@ class ValidationTests(unittest.TestCase):
             "confidence": 0.75,
             "evidence_type": "gov_publicity",
             "evidence": "规划公示转述",
+            "confidence_reason": "公示可对应本地块",
         }])
         errors = collect_errors(result)
         self.assertTrue(any("source_url" in e for e in errors))
@@ -510,6 +525,7 @@ class ValidationTests(unittest.TestCase):
             "confidence": 0.5,
             "evidence_type": "gov_publicity_weak",
             "evidence": "仅确认同区有公示，未能对应本地块",
+            "confidence_reason": "仅同区活动，上限 0.3",
         }])
         errors = collect_errors(result)
         self.assertTrue(any("0.3" in e for e in errors))
@@ -521,6 +537,7 @@ class ValidationTests(unittest.TestCase):
             "evidence_type": "gov_publicity",
             "evidence": "自然资源局公示转述",
             "source_url": "https://example.gov.cn/plan/1",
+            "confidence_reason": "公示道路与地块匹配",
         }])
         self.assertEqual(collect_errors(result), [])
 
@@ -529,9 +546,30 @@ class ValidationTests(unittest.TestCase):
             "label": "x",
             "confidence": 0.5,
             "evidence": "e",
+            "confidence_reason": "placeholder",
         }])
         errors = collect_errors(result)
         self.assertTrue(any("evidence_type" in e for e in errors))
+
+    def test_poi_name_requires_source_url(self):
+        result = _valid_result(related_projects=[{
+            "label": "某项目",
+            "confidence": 0.7,
+            "evidence": "POI 名称",
+            "evidence_type": "poi_name",
+            "confidence_reason": "POI 名直接给出",
+        }])
+        errors = collect_errors(result)
+        self.assertTrue(any("source_url" in e and "poi_name" in e for e in errors))
+
+    def test_confidence_reason_required(self):
+        result = _valid_result(region_type=[{
+            "label": "住宅小区",
+            "confidence": 0.7,
+            "evidence": "landuse=R2",
+        }])
+        errors = collect_errors(result)
+        self.assertTrue(any("confidence_reason" in e for e in errors))
 
 
 class GovSearchTests(unittest.TestCase):
@@ -608,6 +646,44 @@ class GovSearchTests(unittest.TestCase):
         body = out["structuredContent"]
         self.assertEqual(body["candidate_count"], 1)
         self.assertIn("search_plan", body["candidates"][0])
+
+    def test_rejects_output_written_summary(self):
+        feat = self._feature(index=0)
+        feat["project_evidence"] = []
+        summary = {"output_written": True, "features": [feat]}
+        with self.assertRaises(ValueError) as ctx:
+            prepare_gov_web_search(summary)
+        self.assertIn("analyze_result_path", str(ctx.exception))
+        tool = mcp_server.handle_tool("prepare_gov_web_search", {"analyze_result": summary})
+        self.assertTrue(tool.get("isError"))
+        self.assertIn("analyze_result_path", tool["structuredContent"]["error"])
+
+    def test_rejects_sources_missing_places_key(self):
+        feat = {
+            "index": 0,
+            "project_evidence": [],
+            "sources": [{"source": "amap", "status": "ok", "count": 1}],
+        }
+        with self.assertRaises(ValueError):
+            prepare_gov_web_search({"features": [feat]})
+
+    def test_empty_places_list_is_not_summary(self):
+        feat = {"index": 0, "sources": [{"source": "amap", "status": "ok", "places": [], "roads": []}]}
+        out = prepare_gov_web_search({"features": [feat]})
+        self.assertEqual(out["skipped_summary"]["no_admin"], 1)
+
+    def test_prepare_from_analyze_result_path(self):
+        import tempfile
+
+        feat = self._feature(index=0)
+        feat["project_evidence"] = []
+        payload = {"features": [feat]}
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "full.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            out = prepare_gov_web_search(analyze_result_path=path)
+        self.assertEqual(out["candidate_count"], 1)
 
 
 class DataSourceTests(unittest.TestCase):
@@ -1100,11 +1176,128 @@ class ExpandDedupTests(unittest.TestCase):
         self.assertEqual(amap_radii, [300.0])
 
 
+class PageUrlTests(unittest.TestCase):
+    def test_amap_compact_poi_keeps_id_and_page_url(self):
+        item = geo_clients._compact_poi(
+            {"name": "某工地", "id": "B000AAFAC5", "type": "公司企业", "address": "x", "location": "1,2"},
+            "amap",
+        )
+        self.assertEqual(item["id"], "B000AAFAC5")
+        self.assertEqual(item["page_url"], "https://uri.amap.com/poidetail?poiid=B000AAFAC5")
+
+    def test_baidu_compact_poi_page_url(self):
+        item = geo_clients._compact_poi(
+            {"name": "某工地", "uid": "2fd2beabe34a80517adbd220", "address": "x"},
+            "baidu",
+        )
+        self.assertIn("uid=2fd2beabe34a80517adbd220", item["page_url"])
+        self.assertIn("place/detail", item["page_url"])
+        self.assertIn("output=html", item["page_url"])
+
+    def test_no_id_omits_page_url(self):
+        item = geo_clients._compact_poi({"name": "某工地"}, "amap")
+        self.assertNotIn("page_url", item)
+
+    def test_osm_page_url_and_signals(self):
+        summarized = geo_clients._summarize_overpass_elements([
+            {"type": "way", "id": 123, "tags": {"name": "某某建设项目", "construction": "yes"}},
+        ])
+        sig = summarized["project_signals"][0]
+        self.assertEqual(sig["osm_type"], "way")
+        self.assertEqual(sig["osm_id"], 123)
+        self.assertEqual(sig["page_url"], "https://www.openstreetmap.org/way/123")
+
+    def test_project_evidence_lifts_page_url(self):
+        sources = [{
+            "source": "amap",
+            "items": [{
+                "name": "某某建设项目",
+                "page_url": "https://uri.amap.com/poidetail?poiid=B000AAFAC5",
+            }],
+        }]
+        pe = mcp_server.project_evidence_from_sources(sources)
+        self.assertEqual(pe[0]["page_url"], "https://uri.amap.com/poidetail?poiid=B000AAFAC5")
+
+
+class MaxWorkersTests(unittest.TestCase):
+    def test_requested_eight_clamped_to_four(self):
+        out = mcp_server.analyze_regions(
+            geojson={"type": "FeatureCollection", "features": [SQUARE]},
+            search_projects=False,
+            search_poi=False,
+            max_workers=8,
+        )
+        self.assertEqual(out["effective_max_workers"], 4)
+        self.assertNotIn("output_written", out)
+
+    def test_schema_maximum_is_four(self):
+        schema = mcp_server.TOOLS["analyze_regions"]["inputSchema"]["properties"]["max_workers"]
+        self.assertEqual(schema["maximum"], 4)
+        self.assertEqual(schema["default"], 4)
+
+
+class OutputPathTests(unittest.TestCase):
+    def test_writes_full_file_and_returns_summary(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "out.json")
+            summary = mcp_server.analyze_regions(
+                geojson={"type": "FeatureCollection", "features": [SQUARE]},
+                search_projects=False,
+                search_poi=False,
+                output_path=dest,
+            )
+            self.assertTrue(summary["output_written"])
+            self.assertEqual(summary["feature_count"], 1)
+            self.assertNotIn("places", summary["features"][0]["sources"][0] if summary["features"][0]["sources"] else {"x": 1})
+            for src in summary["features"][0].get("sources") or []:
+                self.assertNotIn("places", src)
+                self.assertNotIn("items", src)
+                self.assertNotIn("roads", src)
+            with open(dest, encoding="utf-8") as f:
+                full = json.load(f)
+            self.assertNotIn("output_written", full)
+            self.assertEqual(full["effective_max_workers"], 4)
+            self.assertEqual(full["feature_count"], 1)
+
+    def test_missing_parent_dir_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "missing-parent", "out.json")
+            with self.assertRaises(ValueError) as ctx:
+                mcp_server.analyze_regions(
+                    geojson={"type": "FeatureCollection", "features": [SQUARE]},
+                    search_projects=False,
+                    search_poi=False,
+                    output_path=dest,
+                )
+            self.assertIn("parent directory", str(ctx.exception))
+
+    def test_strict_output_path_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "out.json")
+            env = {"GEO_INPUT_STRICT": "true", "GEO_INPUT_ROOT": os.path.join(td, "sandbox")}
+            os.makedirs(env["GEO_INPUT_ROOT"], exist_ok=True)
+            with mock.patch.dict(os.environ, env, clear=False):
+                with self.assertRaises(ValueError) as ctx:
+                    mcp_server.analyze_regions(
+                        geojson={"type": "FeatureCollection", "features": [SQUARE]},
+                        search_projects=False,
+                        search_poi=False,
+                        output_path=dest,
+                    )
+            self.assertIn("GEO_INPUT_ROOT", str(ctx.exception))
+
+
 class VersionSsotTests(unittest.TestCase):
     def test_server_version_from_version_module(self):
         import version
 
-        self.assertEqual(version.SERVER_VERSION, "2.5.3")
+        self.assertEqual(version.SERVER_VERSION, "2.5.4")
         self.assertEqual(mcp_server.SERVER_VERSION, version.SERVER_VERSION)
         self.assertEqual(geo_clients.SERVER_VERSION, version.SERVER_VERSION)
         ua = geo_clients.get_http().client.headers.get("User-Agent", "")

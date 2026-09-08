@@ -195,13 +195,62 @@ def build_search_plan(
     return {"rounds": rounds_out, "limits": limits}
 
 
+ANALYZE_SUMMARY_ERROR = (
+    "analyze_result is an analyze_regions summary (output_written or sources missing places). "
+    "Pass analyze_result_path pointing to the full JSON file written via output_path."
+)
+
+
+def is_analyze_regions_summary(payload: dict[str, Any]) -> bool:
+    if payload.get("output_written") is True:
+        return True
+    for feat in payload.get("features") or []:
+        if not isinstance(feat, dict):
+            continue
+        for src in feat.get("sources") or []:
+            if not isinstance(src, dict):
+                continue
+            if src.get("status") in ("ok", "empty") and "places" not in src:
+                return True
+    return False
+
+
+def resolve_analyze_result(
+    analyze_result: dict[str, Any] | None = None,
+    analyze_result_path: str | None = None,
+) -> dict[str, Any]:
+    if (analyze_result is None) == (analyze_result_path is None):
+        raise ValueError("Provide exactly one of analyze_result or analyze_result_path")
+    if analyze_result_path is not None:
+        from geo_input import _validate_path
+
+        path = Path(analyze_result_path)
+        _validate_path(path)
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            raise ValueError("analyze_result_path must contain a JSON object")
+    else:
+        payload = analyze_result
+        if not isinstance(payload, dict):
+            raise ValueError("analyze_result must be an object")
+    if is_analyze_regions_summary(payload):
+        raise ValueError(ANALYZE_SUMMARY_ERROR)
+    return payload
+
+
 def _feature_has_project_evidence(feature: dict[str, Any]) -> bool:
     pe = feature.get("project_evidence") or []
     return len(pe) > 0
 
 
-def prepare_gov_web_search(analyze_result: dict[str, Any]) -> dict[str, Any]:
-    features = analyze_result.get("features") or []
+def prepare_gov_web_search(
+    analyze_result: dict[str, Any] | None = None,
+    *,
+    analyze_result_path: str | None = None,
+) -> dict[str, Any]:
+    payload = resolve_analyze_result(analyze_result, analyze_result_path)
+    features = payload.get("features") or []
     templates = load_gov_search_templates()
     candidates: list[dict[str, Any]] = []
     skipped = {"has_project_evidence": 0, "no_admin": 0}

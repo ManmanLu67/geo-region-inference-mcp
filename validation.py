@@ -12,8 +12,8 @@ REQUIRED_TOP_KEYS = {
     "possible_buildings",
     "related_projects",
 }
-REQUIRED_CANDIDATE_KEYS = {"label", "confidence", "evidence"}
-REQUIRED_PROJECT_KEYS = {"label", "confidence", "evidence", "evidence_type"}
+REQUIRED_CANDIDATE_KEYS = {"label", "confidence", "evidence", "confidence_reason"}
+REQUIRED_PROJECT_KEYS = {"label", "confidence", "evidence", "evidence_type", "confidence_reason"}
 VALID_DATA_SOURCES = {"amap", "baidu", "osm", "offline", "hybrid"}
 
 VALID_EVIDENCE_TYPES = {
@@ -84,6 +84,12 @@ def _check_project_candidate(item: dict[str, Any], index: int, errors: list[str]
                 f"related_projects[{index}] requires source_url (http/https) when evidence_type is gov_publicity"
             )
 
+    if et == "poi_name":
+        if not _valid_url(source_url):
+            errors.append(
+                f"related_projects[{index}] requires source_url (http/https) when evidence_type is poi_name"
+            )
+
     if et == "gov_publicity_weak":
         if source_url is not None and source_url != "" and not _valid_url(source_url):
             errors.append(f"related_projects[{index}].source_url must be http/https when provided")
@@ -119,6 +125,9 @@ def _check_candidate_list(name: str, items: Any, errors: list[str]) -> None:
             errors.append(f"{name}[{i}].evidence must be a non-empty string")
         if not isinstance(item["label"], str) or not item["label"].strip():
             errors.append(f"{name}[{i}].label must be a non-empty string")
+        reason = item.get("confidence_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append(f"{name}[{i}].confidence_reason must be a non-empty string")
         if prev_conf is not None and isinstance(conf, (int, float)) and conf > prev_conf + 1e-9:
             errors.append(f"{name} not sorted descending by confidence at index {i} ({conf} > {prev_conf})")
         if isinstance(conf, (int, float)):

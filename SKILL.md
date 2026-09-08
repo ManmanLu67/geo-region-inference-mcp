@@ -27,7 +27,11 @@ Skill 只做推理流程、证据分级与置信度判断。
 - Skill 正常路径**不要**执行 `python scripts/*.py`。
 
 **结论与置信度**
-- 每条 `related_projects` **必须**填 `evidence_type`；校验读该字段，不从 evidence 文本猜。
+- 每条 `related_projects` **必须**填 `evidence_type` 与 `confidence_reason`；`region_type` /
+  `possible_buildings` 同样必填 `confidence_reason`。校验读这些字段，不从 evidence 文本猜。
+- `poi_name` **必须**有可点击 `source_url`（优先抄 MCP `project_evidence[].page_url`）；没有地图
+  详情页链接则不得用 `poi_name` 报高置信。
+- `gov_publicity` 须 `source_url`（官方公示页）。地图 POI 页不是官方立项页，呈现时须说明。
 - 没有直接项目线索时 `confidence` **不得超过 0.4**，且须用 `supported_by` 指向具体的
   `region_type` / `possible_buildings` 候选。
 - 即使 `region_type` 置信度很高，也不能因此提高具体项目名称的置信度。
@@ -43,6 +47,9 @@ Skill 只做推理流程、证据分级与置信度判断。
 
 - **ArcGIS 用户**：优先导出标准 GeoJSON；若误传 Esri REST JSON（`rings`/`attributes`），MCP 会尝试自动转换（合法多环保留孔洞），无法转换时提示重新导出。
 - **大文件/顶点多**：用 `input_path` 指向本地文件，不要把整份 JSON 贴进对话。
+- **大批量输出**：`analyze_regions` 加 `output_path`（`.json`，父目录须已存在）。工具只返回摘要
+  （`output_written: true`）；第三步必须用 `analyze_result_path` 指向该文件，**禁止**把摘要当
+  `analyze_result` 传入（会硬失败，不是「无行政区」）。
 - **SHP 输入**：须先由宿主/文件工具转成 GeoJSON；宿主无法转换时如实告知这是输入层限制，
   不要在 Skill 里重新实现 GIS 解析栈。
 - **投影坐标无 CRS**：`|x|>180` 或 `|y|>90` 且未声明坐标系时 MCP **直接报错**，不要当 WGS84 硬算。
@@ -79,7 +86,8 @@ Skill 只做推理流程、证据分级与置信度判断。
 ## 第三步：政府公示 Web 检索（可选）
 
 在第二步返回**含行政区划**的证据后，对尚无 MCP 直接 `project_evidence` 的地物，调用
-`prepare_gov_web_search(analyze_result)`，MCP 返回**四轮** `search_plan`（街道核心词 →
+`prepare_gov_web_search`：有 `output_path` 时传 `analyze_result_path`，否则传完整
+`analyze_result`。MCP 返回**四轮** `search_plan`（街道核心词 →
 街道同义词 → 区级+道路交叉 → 纯地名/间接线索）。Agent 用 `web_search`/`web_fetch`
 按轮执行。详细 SOP 见 [references/gov_web_search_guide.md](references/gov_web_search_guide.md)。
 
@@ -97,7 +105,7 @@ Skill 只做推理流程、证据分级与置信度判断。
 
 | 优先级 | 证据 | `evidence_type` | 置信度上限 |
 |---|---|---|---|
-| 1 | POI 名称 / 属性字段 / 政府公示直接给出项目名 | `poi_name` / `attribute_field` / `gov_publicity` | 可 >0.6（`gov_publicity` 须 `source_url`） |
+| 1 | POI 名称 / 属性字段 / 政府公示直接给出项目名 | `poi_name` / `attribute_field` / `gov_publicity` | 可 >0.6（`poi_name`/`gov_publicity` 须 `source_url`） |
 | 2 | 明确的项目/规划/备案编号 | `project_number` | 可 >0.6 |
 | 3 | 名称 +「在建/建设中/工地」等状态组合 | `poi_name`（含状态修饰） | 视完整度而定 |
 | 4 | `construction=*` 等直接建设标签 | `attribute_field` | 中等 |
@@ -118,6 +126,9 @@ Skill 只做推理流程、证据分级与置信度判断。
 完全等价的栏目。
 
 完成后对每个地物各调一次 `validate_result({"result": <单个对象>})`；失败按返回的 `errors` 修正后重试。
+
+向用户呈现时：项目名后给出**可点击** `source_url`；读出 `confidence_reason`，不要只甩分数。
+仅有地图 POI 页、无官方公示时，须说明「链接为地图详情页，非官方立项页」。
 
 汇报时**必须**带上第二步 `input_alerts` / `online_summary` 的处置结论（无效几何、简化告警、
 在线源不可用、建议拆分重跑），不得只报成功部分。

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 from geo_clients import (
@@ -38,6 +39,7 @@ from geo_input import (
     normalize_geo_input,
     scan_residual_esri_geometry,
     validate_geometry_fail_fast,
+    validate_output_path,
 )
 from gov_search import prepare_gov_web_search
 from validation import schema_data_source, validate_payload
@@ -104,12 +106,18 @@ def project_evidence_from_sources(sources: list[dict[str, Any]]) -> list[dict[st
                 label = item.get("name") or item.get("address") or item.get("type")
                 if label and label not in seen:
                     seen.add(label)
-                    out.append({"label": label, "source": name, "evidence": item})
+                    rec = {"label": label, "source": name, "evidence": item}
+                    if item.get("page_url"):
+                        rec["page_url"] = item["page_url"]
+                    out.append(rec)
         for item in src.get("project_signals", []):
             label = item.get("name")
             if label and label not in seen:
                 seen.add(label)
-                out.append({"label": label, "source": name, "evidence": item})
+                rec = {"label": label, "source": name, "evidence": item}
+                if item.get("page_url"):
+                    rec["page_url"] = item["page_url"]
+                out.append(rec)
     return out[:30]
 
 
@@ -202,6 +210,57 @@ def summarize_online_channels(features: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _effective_max_workers(max_workers: int) -> int:
+    return min(max(int(max_workers), 1), 4)
+
+
+def _slim_project_evidence(direct: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for x in direct:
+        rec: dict[str, Any] = {"label": x.get("label"), "source": x.get("source")}
+        if x.get("page_url"):
+            rec["page_url"] = x["page_url"]
+        out.append(rec)
+    return out
+
+
+def _slim_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": s.get("source"),
+            "status": s.get("status"),
+            "reason_code": s.get("reason_code"),
+            "count": s.get("count"),
+            "project_signal_count": s.get("project_signal_count"),
+            "expanded_radius_m": s.get("expanded_radius_m"),
+        }
+        for s in sources
+    ]
+
+
+def summarize_analyze_result(full: dict[str, Any], output_path: str) -> dict[str, Any]:
+    features: list[dict[str, Any]] = []
+    for feat in full.get("features") or []:
+        row = {k: v for k, v in feat.items() if k not in ("sources", "project_evidence")}
+        row["project_evidence"] = _slim_project_evidence(feat.get("project_evidence") or [])
+        row["sources"] = _slim_sources(feat.get("sources") or [])
+        features.append(row)
+    summary: dict[str, Any] = {
+        "server": full.get("server"),
+        "server_version": full.get("server_version"),
+        "output_path": output_path,
+        "output_written": True,
+        "feature_count": full.get("feature_count"),
+        "effective_max_workers": full.get("effective_max_workers"),
+        "input_meta": full.get("input_meta"),
+        "input_alerts": full.get("input_alerts"),
+        "features": features,
+    }
+    if "online_summary" in full:
+        summary["online_summary"] = full["online_summary"]
+    return summary
+
+
 def assemble_feature_result(
     radius: float,
     sources: list[dict[str, Any]],
@@ -238,8 +297,10 @@ def analyze_regions(
     search_projects: bool = True,
     search_poi: bool = True,
     expand_radius_if_needed: bool = True,
-    max_workers: int = 8,
+    max_workers: int = 4,
+    output_path: str | None = None,
 ) -> dict[str, Any]:
+    workers = _effective_max_workers(max_workers)
     fc, input_meta = normalize_geo_input(geojson=geojson, input_path=input_path)
     input_alerts = list(input_meta.get("input_alerts") or [])
     feats = feature_list(fc)
@@ -257,7 +318,7 @@ def analyze_regions(
     baidu_by: dict[int, dict[str, Any]] = {}
     osm_by: dict[int, dict[str, Any]] = {}
     if want_net and jobs:
-        amap_by, baidu_by = _amap_baidu_for_jobs(jobs, keywords, max_workers)
+        amap_by, baidu_by = _amap_baidu_for_jobs(jobs, keywords, workers)
         osm_by = overpass_query_batch([(idx, lat, lon, radius) for idx, lat, lon, radius in jobs])
         regeo_cache: dict[tuple[str, float, float], list[dict[str, Any]]] = {}
         apply_regeo_for_jobs(jobs, amap_by, baidu_by, regeo_cache)
@@ -292,7 +353,7 @@ def analyze_regions(
         exp_amap, exp_baidu = run_amap_baidu_job_batches(
             expand_amap_jobs or expand_baidu_jobs,
             PROJECT_KEYWORDS,
-            max_workers,
+            workers,
             query_amap_jobs=expand_amap_jobs,
             query_baidu_jobs=expand_baidu_jobs,
         )
@@ -360,12 +421,17 @@ def analyze_regions(
         "server": SERVER_NAME,
         "server_version": SERVER_VERSION,
         "feature_count": len(merged_out),
+        "effective_max_workers": workers,
         "input_meta": {k: v for k, v in input_meta.items() if k != "input_alerts"},
         "input_alerts": input_alerts,
         "features": merged_out,
     }
     if want_net:
         out["online_summary"] = summarize_online_channels(merged_out)
+    if output_path:
+        dest = validate_output_path(Path(output_path))
+        dest.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        return summarize_analyze_result(out, str(dest))
     return out
 
 
@@ -423,7 +489,11 @@ TOOLS = {
                     "description": "General nearby search only when search_projects is false. Does not disable project search.",
                 },
                 "expand_radius_if_needed": {"type": "boolean", "default": True},
-                "max_workers": {"type": "integer", "default": 8, "minimum": 1, "maximum": 8},
+                "max_workers": {"type": "integer", "default": 4, "minimum": 1, "maximum": 4},
+                "output_path": {
+                    "type": "string",
+                    "description": "Write the full result JSON to this .json path; the tool return is a summary without sources.items/places/roads.",
+                },
             },
         },
     },
@@ -455,16 +525,19 @@ TOOLS = {
         "inputSchema": {"type": "object", "properties": {"result": {"type": "object"}}, "required": ["result"]},
     },
     "prepare_gov_web_search": {
-        "description": "After analyze_regions: build a four-round government web search plan for features without direct project_evidence and with district-level admin context. No HTTP; Agent runs web_search/web_fetch.",
+        "description": "After analyze_regions: build a four-round government web search plan for features without direct project_evidence and with district-level admin context. No HTTP; Agent runs web_search/web_fetch. Pass the full analyze_regions body, or analyze_result_path to a file written via output_path. Summaries (output_written) are rejected.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "analyze_result": {
                     "type": "object",
-                    "description": "Full analyze_regions response body (features with sources/places/roads).",
-                }
+                    "description": "Full analyze_regions response body (features with sources/places/roads). Mutually exclusive with analyze_result_path.",
+                },
+                "analyze_result_path": {
+                    "type": "string",
+                    "description": "Path to the full JSON file written by analyze_regions(output_path=...). Mutually exclusive with analyze_result.",
+                },
             },
-            "required": ["analyze_result"],
         },
     },
     "check_api_status": {
@@ -493,8 +566,7 @@ TOOLS = {
 def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name == "analyze_regions":
         try:
-            workers = int(args.get("max_workers", 8))
-            workers = max(1, min(workers, 8))
+            workers = _effective_max_workers(int(args.get("max_workers", 4)))
             geojson = args.get("geojson")
             input_path = args.get("input_path")
             return ok(
@@ -505,6 +577,7 @@ def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
                     search_poi=bool(args.get("search_poi", True)),
                     expand_radius_if_needed=bool(args.get("expand_radius_if_needed", True)),
                     max_workers=workers,
+                    output_path=args.get("output_path") or None,
                 )
             )
         except ValueError as e:
@@ -553,10 +626,15 @@ def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name == "validate_result":
         return ok(validate_result(args["result"]))
     if name == "prepare_gov_web_search":
-        analyze_result = args.get("analyze_result")
-        if not isinstance(analyze_result, dict):
-            return err("analyze_result must be an object")
-        return ok(prepare_gov_web_search(analyze_result))
+        try:
+            return ok(
+                prepare_gov_web_search(
+                    args.get("analyze_result"),
+                    analyze_result_path=args.get("analyze_result_path"),
+                )
+            )
+        except ValueError as e:
+            return err(str(e))
     if name == "check_api_status":
         return ok(
             check_api_status(

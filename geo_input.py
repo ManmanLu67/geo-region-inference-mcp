@@ -89,6 +89,27 @@ def _validate_path(path: Path) -> None:
             raise ValueError(f"input_path must be under GEO_INPUT_ROOT ({root}) when GEO_INPUT_STRICT=true") from e
 
 
+def validate_output_path(path: Path) -> Path:
+    """Validate a write target. Does not require the file to exist yet."""
+    resolved = path.expanduser().resolve()
+    if resolved.suffix.lower() != ".json":
+        raise ValueError(f"output_path must be .json, got {resolved.suffix!r}")
+    parent = resolved.parent
+    if not parent.is_dir():
+        raise ValueError(f"output_path parent directory does not exist: {parent}")
+    if resolved.exists() and not resolved.is_file():
+        raise ValueError(f"output_path exists but is not a file: {path}")
+    if _strict_paths():
+        root = _input_root()
+        try:
+            resolved.relative_to(root)
+        except ValueError as e:
+            raise ValueError(
+                f"output_path must be under GEO_INPUT_ROOT ({root}) when GEO_INPUT_STRICT=true"
+            ) from e
+    return resolved
+
+
 def _has_valid_geojson_coordinates(geom: dict[str, Any]) -> bool:
     coords = geom.get("coordinates")
     if coords is None:

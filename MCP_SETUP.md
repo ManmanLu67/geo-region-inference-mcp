@@ -78,7 +78,8 @@ If both `search_projects` and `search_poi` are false, no online APIs are called.
 ## Performance model
 
 - No repeated `python script.py` per feature or data source.
-- Concurrent AMap/Baidu/OSM inside `analyze_regions`; bounded `ThreadPoolExecutor`.
+- Concurrent AMap/Baidu/OSM inside `analyze_regions`; `max_workers` capped at 4 (`effective_max_workers`).
+- Optional `output_path` writes the full JSON; the tool return is a summary. Use `prepare_gov_web_search(analyze_result_path=...)` afterwards.
 - OSM batched (up to 10 centroids per Overpass HTTP call).
 - AMap regeo batched (`batch=true`, ≤20 unique centroids per HTTP) inside `analyze_regions`; Baidu regeo remains single-point.
 - Compact evidence returned to the LLM; do not raise worker counts aggressively.

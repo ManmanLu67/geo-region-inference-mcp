@@ -20,9 +20,11 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 
   "server": "geo-region-inference",
 
-  "server_version": "2.5.3",  // 示例值；实际以 version.py 为准
+  "server_version": "2.5.4",  // 示例值；实际以 version.py 为准
 
   "feature_count": 2,
+
+  "effective_max_workers": 4,
 
   "input_meta": {
 
@@ -168,7 +170,7 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 
   "project_evidence": [
 
-    { "label": "XX花园二期建设项目", "source": "amap", "evidence": { /* POI 摘要 */ } }
+    { "label": "XX花园二期建设项目", "source": "amap", "page_url": "https://uri.amap.com/poidetail?poiid=…", "evidence": { /* POI 摘要，含 id 与 page_url */ } }
 
   ],
 
@@ -346,7 +348,9 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 
 | `expand_radius_if_needed` | `true` | 无直接项目证据时按源扩圈一次（约 2.5×，上限 5000m）；跳过 `unavailable` 源 |
 
-| `max_workers` | `8` | 并发上限 8；高德/百度线程池另限 4 |
+| `max_workers` | `4` | 高德/百度线程池上限 1–4；返回 `effective_max_workers` |
+
+| `output_path` | — | 可选。把**完整**结果写入 `.json`（父目录须存在）；工具返回摘要（`output_written: true`，无 `sources.places/roads/items`）。`GEO_INPUT_STRICT` 时须在 `GEO_INPUT_ROOT` 下 |
 
 
 
@@ -434,7 +438,11 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 
 |------|------|------|
 
-| `analyze_result` | 是 | `analyze_regions` 的完整返回体 |
+| `analyze_result` | 与 `analyze_result_path` 二选一 | `analyze_regions` 的**完整**返回体（须含 `sources[].places`） |
+
+| `analyze_result_path` | 与 `analyze_result` 二选一 | `output_path` 写出的完整 JSON 路径 |
+
+传入摘要（`output_written: true`，或 `ok`/`empty` 源缺少 `places` 键）会 **error**，提示改用 `analyze_result_path`。不要把摘要当成「无行政区」。
 
 
 

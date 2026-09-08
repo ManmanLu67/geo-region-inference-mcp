@@ -211,23 +211,65 @@ def classify_baidu_search(raw: Any) -> dict[str, Any]:
     return {"status": "ok" if items else "empty", "count": len(items), "items": items[:30]}
 
 
+def amap_poi_page_url(poi_id: Any) -> str | None:
+    """Official URI API; probes redirect to ditu.amap.com/detail/{id}."""
+    s = str(poi_id or "").strip()
+    if not s:
+        return None
+    return "https://uri.amap.com/poidetail?poiid=" + urllib.parse.quote(s, safe="")
+
+
+def baidu_poi_page_url(uid: Any) -> str | None:
+    """Official web URI (lbs.baidu.com webapi/uri/web). Browser clicks; some sandboxes TLS-block HEAD."""
+    s = str(uid or "").strip()
+    if not s:
+        return None
+    return "https://api.map.baidu.com/place/detail?" + urllib.parse.urlencode(
+        {"uid": s, "output": "html", "src": "webapp.geo-region-inference"}
+    )
+
+
+def osm_page_url(osm_type: Any, osm_id: Any) -> str | None:
+    t = str(osm_type or "").strip().lower()
+    if t not in ("node", "way", "relation"):
+        return None
+    try:
+        oid = int(osm_id)
+    except (TypeError, ValueError):
+        return None
+    if oid <= 0:
+        return None
+    return f"https://www.openstreetmap.org/{t}/{oid}"
+
+
 def _compact_poi(item: dict[str, Any], source: str) -> dict[str, Any]:
     if source == "amap":
-        return {
+        poi_id = item.get("id")
+        out = {
             "name": item.get("name"),
             "type": item.get("type"),
             "address": item.get("address"),
             "businessarea": item.get("businessarea"),
             "location": item.get("location"),
+            "id": poi_id,
         }
+        page = amap_poi_page_url(poi_id)
+        if page:
+            out["page_url"] = page
+        return out
     if source == "baidu":
-        return {
+        uid = item.get("uid")
+        out = {
             "name": item.get("name"),
             "type": item.get("tag") or item.get("type"),
             "address": item.get("address"),
-            "uid": item.get("uid"),
+            "uid": uid,
             "location": item.get("location"),
         }
+        page = baidu_poi_page_url(uid)
+        if page:
+            out["page_url"] = page
+        return out
     return item
 
 
@@ -597,7 +639,17 @@ def _summarize_overpass_elements(elements: list[dict[str, Any]]) -> dict[str, An
         if tags.get("construction") or (
             name and any(w.lower() in name.lower() for w in project_signal_tokens())
         ):
-            project_signals.append({"name": name, "construction": tags.get("construction"), "description": tags.get("description")})
+            sig: dict[str, Any] = {
+                "name": name,
+                "construction": tags.get("construction"),
+                "description": tags.get("description"),
+                "osm_type": el.get("type"),
+                "osm_id": el.get("id"),
+            }
+            page = osm_page_url(el.get("type"), el.get("id"))
+            if page:
+                sig["page_url"] = page
+            project_signals.append(sig)
     nonempty = bool(landuse or building_types or amenities or project_signals)
     return {
         "status": "ok" if nonempty else "empty",
