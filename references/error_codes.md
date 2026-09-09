@@ -57,10 +57,10 @@ MCP 返回的结构化错误分两类：**`sources[].reason_code`**（在线 API
 
 | reason | 含义 |
 |--------|------|
-| `esri_ring_roles_unresolved` | Esri `rings` 缠绕/bbox 无法判定外环与孔洞，已拆为独立部件（面积可能偏大） |
+| `esri_ring_roles_unresolved` | Esri `rings` **穿插**（部分重叠、无法嵌套）时无法判定外环与孔洞，已拆为独立部件（面积可能偏大）。绕序（CW/CCW）**不**参与判定。 |
 | `paths_converted` | Esri `paths` 转为 LineString / MultiLineString |
 
-合法 Esri 环（外环 CW + 孔洞 CCW + bbox 包含）**保留孔洞且不发**本告警。
+合法 Esri 环（包含关系 + even-odd 嵌套深度，绕序忽略）**保留孔洞且不发**本告警。
 
 ## `check_api_status`
 

@@ -9,7 +9,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from geo_clients import overpass_query  # noqa: E402
+from geo_core.clients import overpass_query  # noqa: E402
 
 
 def main():

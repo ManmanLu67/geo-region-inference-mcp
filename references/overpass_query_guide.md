@@ -2,9 +2,9 @@
 
 ## 执行路径
 
-**正常任务**：使用 MCP `analyze_regions`，OSM 查询由 `geo_clients.overpass_query_batch` 在服务端批量完成，Agent **不要**逐地物调用脚本或手写 Overpass QL。
+**正常任务**：使用 MCP `analyze_regions`，OSM 查询由 `geo_core.clients.overpass_query_batch` 在服务端批量完成，Agent **不要**逐地物调用脚本或手写 Overpass QL。
 
-**本地调试**（Skill 正常路径禁用）：`python scripts/query_overpass.py <lat> <lon> [radius_m]` 为 `geo_clients` 薄封装；见 [scripts/README.md](../scripts/README.md)。
+**本地调试**（Skill 正常路径禁用）：`python scripts/query_overpass.py <lat> <lon> [radius_m]` 为 `geo_core.clients` 薄封装；见 [scripts/README.md](../scripts/README.md)。
 
 字段定义见 [mcp_evidence_schema.md](mcp_evidence_schema.md) 中 `sources[]`（`source=osm`）一节。
 

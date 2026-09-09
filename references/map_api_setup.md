@@ -45,8 +45,8 @@ MCP 的 `analyze_regions` **并发**查询高德、百度、OSM（不是串行 f
 ## 坐标系提醒
 
 - 高德用 GCJ-02，百度用 BD-09，OSM/Overpass 用标准 WGS84
-- 转换在 `geo_clients.py` 内完成；传入 ArcGIS 导出的 WGS84 即可
-- **已废弃**：`scripts/coord_transform.py` 仅本地调试（见 [scripts/README.md](../scripts/README.md)）。坐标转换已在 `geo_clients.py` / MCP 内完成。
+- 转换在 `geo_core/clients.py` 内完成；传入 ArcGIS 导出的 WGS84 即可
+- **已废弃**：`scripts/coord_transform.py` 仅本地调试（见 [scripts/README.md](../scripts/README.md)）。坐标转换已在 `geo_core.clients` / MCP 内完成。
 
 ## MCP 证据 Schema
 

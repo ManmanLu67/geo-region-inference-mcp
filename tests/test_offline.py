@@ -13,11 +13,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-import geo_clients  # noqa: E402
-import gov_search  # noqa: E402
-import geo_input  # noqa: E402
+from geo_core import analysis  # noqa: E402
+from geo_core import clients as geo_clients  # noqa: E402
+from geo_core import evidence  # noqa: E402
+from geo_core import geometry as geo_geometry  # noqa: E402
+from geo_core import inputs as geo_input  # noqa: E402
 import mcp_server  # noqa: E402
-from geo_clients import (  # noqa: E402
+from geo_core.clients import (  # noqa: E402
     DISABLED,
     INVALID_API_KEY,
     NO_API_KEY,
@@ -35,14 +37,14 @@ from geo_clients import (  # noqa: E402
     query_amap,
     query_baidu,
 )
-from gov_search import (  # noqa: E402
+from geo_core.gov_search import (  # noqa: E402
     build_search_plan,
     extract_admin_division,
     extract_match_roads,
     load_gov_search_templates,
     prepare_gov_web_search,
 )
-from validation import collect_errors, schema_data_source, validate_payload  # noqa: E402
+from geo_core.validation import collect_errors, schema_data_source, validate_payload  # noqa: E402
 
 SQUARE = {
     "type": "Feature",
@@ -91,7 +93,7 @@ def _valid_result(**overrides):
 
 class GeometryTests(unittest.TestCase):
     def test_polygon_centroid_and_area(self):
-        stats = mcp_server.geometry_stats(SQUARE, 0)
+        stats = geo_geometry.geometry_stats(SQUARE, 0)
         self.assertEqual(stats["index"], 0)
         self.assertEqual(stats["geometry_type"], "Polygon")
         self.assertAlmostEqual(stats["centroid"]["lon"], 113.2649, places=4)
@@ -100,16 +102,16 @@ class GeometryTests(unittest.TestCase):
         self.assertGreater(stats["bbox_width_m"], 0)
 
     def test_empty_geometry(self):
-        stats = mcp_server.geometry_stats({"type": "Feature", "geometry": {}, "properties": {}}, 1)
+        stats = geo_geometry.geometry_stats({"type": "Feature", "geometry": {}, "properties": {}}, 1)
         self.assertIn("error", stats)
 
     def test_feature_count_limit(self):
-        geojson = {"type": "FeatureCollection", "features": [SQUARE] * (mcp_server.MAX_FEATURES + 1)}
+        geojson = {"type": "FeatureCollection", "features": [SQUARE] * (analysis.MAX_FEATURES + 1)}
         with self.assertRaises(ValueError):
-            mcp_server.analyze_regions(geojson, search_projects=False, search_poi=False)
+            analysis.analyze_regions(geojson, search_projects=False, search_poi=False)
 
     def test_calculate_geometry_limit(self):
-        geojson = {"type": "FeatureCollection", "features": [SQUARE] * (mcp_server.MAX_FEATURES + 1)}
+        geojson = {"type": "FeatureCollection", "features": [SQUARE] * (analysis.MAX_FEATURES + 1)}
         out = mcp_server.handle_tool("calculate_geometry", {"geojson": geojson})
         self.assertTrue(out["isError"])
 
@@ -134,7 +136,7 @@ class GeometryTests(unittest.TestCase):
         self.assertTrue(out["isError"])
 
     def test_no_coordinate_system_warning(self):
-        stats = mcp_server.geometry_stats(SQUARE, 0)
+        stats = geo_geometry.geometry_stats(SQUARE, 0)
         self.assertNotIn("coordinate_system_warning", stats)
 
 
@@ -142,7 +144,7 @@ class CentroidAndHoleTests(unittest.TestCase):
     FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 
     def _beijing_rect(self, width_m=11.0, height_m=10.0, lon=116.39, lat=39.91):
-        from geo_geometry import deg_to_m_factors
+        from geo_core.geometry import deg_to_m_factors
 
         mx, my = deg_to_m_factors(lat)
         dlon, dlat = (width_m / 2.0) / mx, (height_m / 2.0) / my
@@ -161,7 +163,7 @@ class CentroidAndHoleTests(unittest.TestCase):
 
     def test_small_beijing_polygon_centroid_in_bbox(self):
         feat, _area, lon, lat, _ring = self._beijing_rect()
-        stats = mcp_server.geometry_stats(feat, 0)
+        stats = geo_geometry.geometry_stats(feat, 0)
         bbox = stats["bbox"]
         c = stats["centroid"]
         self.assertGreaterEqual(c["lon"], bbox["min_lon"])
@@ -172,10 +174,10 @@ class CentroidAndHoleTests(unittest.TestCase):
         self.assertAlmostEqual(c["lat"], lat, places=5)
 
     def test_local_metric_vs_vertex_avg_small_ring(self):
-        from geo_geometry import deg_to_m_factors
+        from geo_core.geometry import deg_to_m_factors
 
         feat, _area, _lon, _lat, ring = self._beijing_rect()
-        stats = mcp_server.geometry_stats(feat, 0)
+        stats = geo_geometry.geometry_stats(feat, 0)
         n = len(ring) - 1
         avg_lon = sum(p[0] for p in ring[:n]) / n
         avg_lat = sum(p[1] for p in ring[:n]) / n
@@ -185,20 +187,20 @@ class CentroidAndHoleTests(unittest.TestCase):
 
     def test_centroid_area_vs_analytic(self):
         feat, expected, _lon, _lat, _ring = self._beijing_rect()
-        stats = mcp_server.geometry_stats(feat, 0)
+        stats = geo_geometry.geometry_stats(feat, 0)
         self.assertLess(abs(stats["area_m2"] - expected) / expected, 0.01)
 
     def test_projected_ring_skips_deg_to_m_factors(self):
-        from geo_geometry import ring_area_perimeter
+        from geo_core.geometry import ring_area_perimeter
 
         ring = [[500000.0, 4400000.0], [500100.0, 4400000.0], [500100.0, 4400100.0], [500000.0, 4400100.0], [500000.0, 4400000.0]]
-        with mock.patch("geo_geometry.deg_to_m_factors", side_effect=AssertionError("must not convert projected y")):
+        with mock.patch("geo_core.geometry.deg_to_m_factors", side_effect=AssertionError("must not convert projected y")):
             area, perim = ring_area_perimeter(ring, projected=True)
         self.assertAlmostEqual(area, 10000.0, delta=1.0)
         self.assertGreater(perim, 0)
 
     def test_polygon_with_hole_net_area_and_outer_perimeter(self):
-        from geo_geometry import ring_area_perimeter, ring_centroid
+        from geo_core.geometry import ring_area_perimeter, ring_centroid
 
         path = os.path.join(self.FIXTURES, "polygon_with_hole_wgs84.json")
         with open(path, encoding="utf-8") as f:
@@ -206,7 +208,7 @@ class CentroidAndHoleTests(unittest.TestCase):
         feat = fc["features"][0]
         coords = feat["geometry"]["coordinates"]
         with mock.patch.dict(os.environ, {"GEO_HOLE_DEBUG": "0"}):
-            stats = mcp_server.geometry_stats(feat, 0)
+            stats = geo_geometry.geometry_stats(feat, 0)
         a_o, p_o = ring_area_perimeter(coords[0])
         a_h, _p_h = ring_area_perimeter(coords[1])
         lon_o, lat_o, ra_o = ring_centroid(coords[0])
@@ -233,7 +235,7 @@ class CentroidAndHoleTests(unittest.TestCase):
             "geometry": {"type": "MultiPolygon", "coordinates": [[square], hole_coords]},
         }
         with mock.patch.dict(os.environ, {"GEO_HOLE_DEBUG": "0"}):
-            stats = mcp_server.geometry_stats(feat, 0)
+            stats = geo_geometry.geometry_stats(feat, 0)
         self.assertEqual(stats["geometry_type"], "MultiPolygon")
         self.assertGreater(stats["area_m2"], 0)
         self.assertIsNotNone(stats["centroid"])
@@ -246,8 +248,8 @@ class CentroidAndHoleTests(unittest.TestCase):
             feat = json.loads(f.read())["features"][0]
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {"GEO_HOLE_DEBUG": "1", "GEO_HOLE_DEBUG_RATIO": "0.95"}):
-            with mock.patch("geo_geometry.sys.stderr", buf):
-                mcp_server.geometry_stats(feat, 7)
+            with mock.patch("geo_core.geometry.sys.stderr", buf):
+                geo_geometry.geometry_stats(feat, 7)
         text = buf.getvalue()
         self.assertIn("hole-debug", text)
         self.assertIn("index=7", text)
@@ -261,7 +263,7 @@ class CentroidAndHoleTests(unittest.TestCase):
             "geometry": {"type": "Polygon", "coordinates": [ring, list(ring)]},
         }
         with mock.patch.dict(os.environ, {"GEO_HOLE_DEBUG": "0"}):
-            stats = mcp_server.geometry_stats(feat, 0)
+            stats = geo_geometry.geometry_stats(feat, 0)
         self.assertEqual(stats["area_m2"], 0.0)
         self.assertIsNone(stats["compactness"])
 
@@ -279,7 +281,7 @@ class GeoInputTests(unittest.TestCase):
         }
         fc, meta = geo_input.normalize_geo_input(geojson=payload)
         self.assertTrue(geo_input._looks_like_esri(payload))
-        stats = mcp_server.geometry_stats(fc["features"][0], 0)
+        stats = geo_geometry.geometry_stats(fc["features"][0], 0)
         self.assertNotIn("error", stats)
         self.assertGreater(stats.get("area_m2") or 0, 0)
         self.assertTrue(meta.get("esri_converted"))
@@ -296,28 +298,34 @@ class GeoInputTests(unittest.TestCase):
 
     def test_esri_fixture_file(self):
         path = os.path.join(self.FIXTURES, "esri_featurecollection_rings.json")
-        out = mcp_server.analyze_regions(input_path=path, search_projects=False, search_poi=False)
+        out = analysis.analyze_regions(input_path=path, search_projects=False, search_poi=False)
         self.assertEqual(out["feature_count"], 1)
         self.assertGreater(out["features"][0].get("area_m2") or 0, 0)
 
     def test_esri_paths_false_negative_converted(self):
         path = os.path.join(self.FIXTURES, "esri_paths_false_negative.json")
         fc, meta = geo_input.normalize_geo_input(input_path=path)
-        stats = mcp_server.geometry_stats(fc["features"][0], 0)
+        stats = geo_geometry.geometry_stats(fc["features"][0], 0)
         self.assertNotIn("error", stats)
         self.assertEqual(stats.get("geometry_type"), "LineString")
 
-    def test_esri_inner_ring_geometry_simplified_alert(self):
+    def test_esri_nested_ccw_hole_no_simplified_alert(self):
         path = os.path.join(self.FIXTURES, "esri_polygon_with_hole.json")
         fc, meta = geo_input.normalize_geo_input(input_path=path)
         codes = [a["code"] for a in meta["input_alerts"]]
-        self.assertIn("GEOMETRY_SIMPLIFIED", codes)
-        idx_alert = next(a for a in meta["input_alerts"] if a["code"] == "GEOMETRY_SIMPLIFIED")
-        self.assertIn(0, idx_alert.get("feature_indices", []))
-        reasons = idx_alert.get("simplify_reasons") or {}
-        self.assertIn("esri_ring_roles_unresolved", reasons.get("0", []))
-        self.assertEqual(fc["features"][0]["geometry"]["type"], "MultiPolygon")
-        self.assertEqual(len(fc["features"][0]["geometry"]["coordinates"]), 2)
+        self.assertNotIn("GEOMETRY_SIMPLIFIED", codes)
+        geom = fc["features"][0]["geometry"]
+        self.assertEqual(geom["type"], "Polygon")
+        self.assertEqual(len(geom["coordinates"]), 2)
+        stats = geo_geometry.geometry_stats(fc["features"][0], 0)
+        parts = geo_geometry.polygon_parts(geom)
+        self.assertEqual(len(parts), 1)
+        outer, holes = parts[0]
+        self.assertEqual(len(holes), 1)
+        a_o, _ = geo_geometry.ring_area_perimeter(outer)
+        a_h, _ = geo_geometry.ring_area_perimeter(holes[0])
+        self.assertAlmostEqual(stats["area_m2"], a_o - a_h, delta=0.2)
+        self.assertAlmostEqual((a_o - a_h) / a_o, 0.84, places=2)
 
     def test_esri_cw_hole_preserved_no_simplified_alert(self):
         path = os.path.join(self.FIXTURES, "esri_polygon_with_hole_cw.json")
@@ -327,6 +335,59 @@ class GeoInputTests(unittest.TestCase):
         geom = fc["features"][0]["geometry"]
         self.assertEqual(geom["type"], "Polygon")
         self.assertEqual(len(geom["coordinates"]), 2)
+
+    def test_esri_hole_listed_first(self):
+        path = os.path.join(self.FIXTURES, "esri_hole_listed_first.json")
+        fc, meta = geo_input.normalize_geo_input(input_path=path)
+        codes = [a["code"] for a in meta["input_alerts"]]
+        self.assertNotIn("GEOMETRY_SIMPLIFIED", codes)
+        geom = fc["features"][0]["geometry"]
+        self.assertEqual(geom["type"], "Polygon")
+        self.assertEqual(len(geom["coordinates"]), 2)
+
+    def test_esri_nested_island_two_outers(self):
+        path = os.path.join(self.FIXTURES, "esri_nested_island.json")
+        fc, meta = geo_input.normalize_geo_input(input_path=path)
+        codes = [a["code"] for a in meta["input_alerts"]]
+        self.assertNotIn("GEOMETRY_SIMPLIFIED", codes)
+        geom = fc["features"][0]["geometry"]
+        self.assertEqual(geom["type"], "MultiPolygon")
+        self.assertEqual(len(geom["coordinates"]), 2)
+        hole_parts = [p for p in geom["coordinates"] if len(p) > 1]
+        island_parts = [p for p in geom["coordinates"] if len(p) == 1]
+        self.assertEqual(len(hole_parts), 1)
+        self.assertEqual(len(island_parts), 1)
+
+    def test_esri_partial_overlap_unresolved(self):
+        path = os.path.join(self.FIXTURES, "esri_rings_partial_overlap.json")
+        fc, meta = geo_input.normalize_geo_input(input_path=path)
+        alert = next(a for a in meta["input_alerts"] if a["code"] == "GEOMETRY_SIMPLIFIED")
+        self.assertIn("esri_ring_roles_unresolved", (alert.get("simplify_reasons") or {}).get("0", []))
+        self.assertEqual(fc["features"][0]["geometry"]["type"], "MultiPolygon")
+        self.assertEqual(len(fc["features"][0]["geometry"]["coordinates"]), 2)
+
+    def test_esri_disjoint_rings_two_parts_no_alert(self):
+        path = os.path.join(self.FIXTURES, "esri_rings_disjoint.json")
+        fc, meta = geo_input.normalize_geo_input(input_path=path)
+        codes = [a["code"] for a in meta["input_alerts"]]
+        self.assertNotIn("GEOMETRY_SIMPLIFIED", codes)
+        geom = fc["features"][0]["geometry"]
+        self.assertEqual(geom["type"], "MultiPolygon")
+        self.assertEqual(len(geom["coordinates"]), 2)
+
+    def test_ring_inside_ratio_boundaries(self):
+        """0.6 is ray-cast boundary tolerance, not a GIS standard.
+
+        Classic nest / share one vertex should nest; edge-adjacent neighbour should not.
+        Optional FID 84/85 interior ratios live in tests/fixtures/test3.local.json (not CI).
+        """
+        outer = [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]
+        nested = [[3, 3], [7, 3], [7, 7], [3, 7], [3, 3]]
+        shared_vertex = [[0, 0], [3, 1], [1, 3], [0, 0]]
+        adjacent = [[10, 0], [14, 0], [14, 4], [10, 4], [10, 0]]
+        self.assertTrue(geo_input._ring_inside(nested, outer))
+        self.assertTrue(geo_input._ring_inside(shared_vertex, outer))
+        self.assertFalse(geo_input._ring_inside(adjacent, outer))
 
     def test_esri_paths_converted_keeps_generic_message(self):
         path = os.path.join(self.FIXTURES, "esri_paths_false_negative.json")
@@ -342,7 +403,7 @@ class GeoInputTests(unittest.TestCase):
         bad = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": []}}
         fc = {"type": "FeatureCollection", "features": [good, good, good, bad]}
         with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "0.5"}):
-            out = mcp_server.analyze_regions(geojson=fc, search_projects=False, search_poi=False)
+            out = analysis.analyze_regions(geojson=fc, search_projects=False, search_poi=False)
         codes = [a["code"] for a in out["input_alerts"]]
         self.assertIn("GEOMETRY_INVALID", codes)
         alert = next(a for a in out["input_alerts"] if a["code"] == "GEOMETRY_INVALID")
@@ -353,11 +414,11 @@ class GeoInputTests(unittest.TestCase):
     def test_residual_esri_keys_hybrid_geometry(self):
         path = os.path.join(self.FIXTURES, "esri_hybrid_paths_with_coordinates.json")
         fc, _meta = geo_input.normalize_geo_input(input_path=path)
-        from geo_geometry import feature_list
+        from geo_core.geometry import feature_list
 
         feats = feature_list(fc)
         reasons = geo_input.scan_residual_esri_geometry(feats)
-        stats = [mcp_server.geometry_stats(f, i) for i, f in enumerate(feats)]
+        stats = [geo_geometry.geometry_stats(f, i) for i, f in enumerate(feats)]
         alerts = geo_input.build_geometry_invalid_alerts(stats, len(feats), structure_reasons=reasons)
         alert = next(a for a in alerts if a["code"] == "GEOMETRY_INVALID")
         self.assertIn(0, alert["invalid_indices"])
@@ -367,7 +428,7 @@ class GeoInputTests(unittest.TestCase):
             hybrid = json.load(f)["features"][0]
         fc_multi = {"type": "FeatureCollection", "features": [json.loads(json.dumps(SQUARE))] * 3 + [hybrid]}
         with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "0.5"}):
-            out = mcp_server.analyze_regions(geojson=fc_multi, search_projects=False, search_poi=False)
+            out = analysis.analyze_regions(geojson=fc_multi, search_projects=False, search_poi=False)
         alert2 = next(a for a in out["input_alerts"] if a["code"] == "GEOMETRY_INVALID")
         self.assertIn(3, alert2["invalid_indices"])
         self.assertEqual(alert2["invalid_reasons"]["3"], "residual_esri_keys")
@@ -391,7 +452,7 @@ class GeoInputTests(unittest.TestCase):
         fc = {"type": "FeatureCollection", "features": [good, bad]}
         with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "0.5"}):
             with self.assertRaises(ValueError):
-                mcp_server.analyze_regions(geojson=fc, search_projects=False, search_poi=False)
+                analysis.analyze_regions(geojson=fc, search_projects=False, search_poi=False)
 
     def test_projected_without_crs_rejected(self):
         payload = {
@@ -416,7 +477,7 @@ class GeoInputTests(unittest.TestCase):
         path = os.path.join(self.FIXTURES, "cgcs2000_4509_sample.geojson")
         fc, meta = geo_input.normalize_geo_input(input_path=path)
         self.assertTrue(meta["crs"]["reprojected"])
-        stats = mcp_server.geometry_stats(fc["features"][0], 0)
+        stats = geo_geometry.geometry_stats(fc["features"][0], 0)
         self.assertGreater(stats["centroid"]["lon"], 116)
         self.assertGreater(stats["centroid"]["lat"], 40)
         from pyproj import Transformer
@@ -428,7 +489,7 @@ class GeoInputTests(unittest.TestCase):
 
     def test_input_path_reads_fixture(self):
         path = os.path.join(self.FIXTURES, "multi_feature_sample.json")
-        out = mcp_server.analyze_regions(input_path=path, search_projects=False, search_poi=False)
+        out = analysis.analyze_regions(input_path=path, search_projects=False, search_poi=False)
         self.assertGreater(out["feature_count"], 0)
         self.assertIn("input_meta", out)
 
@@ -451,7 +512,7 @@ class GeoInputTests(unittest.TestCase):
             geojson={"type": "FeatureCollection", "features": [zsquare]}
         )
         self.assertTrue(meta["z_stripped"])
-        stats = mcp_server.geometry_stats(fc["features"][0], 0)
+        stats = geo_geometry.geometry_stats(fc["features"][0], 0)
         self.assertNotIn("error", stats)
 
 
@@ -460,7 +521,7 @@ class OnlineSummaryTests(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k not in ("AMAP_KEY", "BAIDU_AK")}
         with mock.patch.dict(os.environ, env, clear=True):
             with mock.patch.object(geo_clients, "OSM_ENABLED", False):
-                out = mcp_server.analyze_regions(
+                out = analysis.analyze_regions(
                     geojson={"type": "FeatureCollection", "features": [SQUARE]},
                     search_projects=True,
                     search_poi=False,
@@ -752,16 +813,92 @@ class StatusContractTests(unittest.TestCase):
 
 class ProtocolTests(unittest.TestCase):
     def test_initialize_legacy(self):
+        from mcp_types.version import LATEST_HANDSHAKE_VERSION
+
         out = mcp_server.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
-        self.assertEqual(out["result"]["protocolVersion"], "2025-11-25")
+        self.assertEqual(out["result"]["protocolVersion"], LATEST_HANDSHAKE_VERSION)
 
     def test_initialize_does_not_echo_2026(self):
-        out = mcp_server.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2026-07-28"}})
-        self.assertEqual(out["result"]["protocolVersion"], "2025-11-25")
+        from mcp_types.version import LATEST_HANDSHAKE_VERSION
 
-    def test_discover_versions_unchanged(self):
+        out = mcp_server.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2026-07-28"}})
+        self.assertEqual(out["result"]["protocolVersion"], LATEST_HANDSHAKE_VERSION)
+
+    def test_discover_versions_follow_registry(self):
+        from mcp_types.version import SUPPORTED_PROTOCOL_VERSIONS
+
         out = mcp_server.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}})
-        self.assertEqual(out["result"]["supportedVersions"], ["2026-07-28", "2025-11-25"])
+        self.assertEqual(out["result"]["supportedVersions"], list(SUPPORTED_PROTOCOL_VERSIONS))
+
+
+class GapFreezeG1G4Tests(unittest.TestCase):
+    """Pin G1–G4 current behavior before changing _resolve_esri_rings (G5). Do not 'fix' these here."""
+
+    def test_g1_rings_plus_paths_drops_paths_silently(self):
+        payload = {
+            "spatialReference": {"wkid": 4326},
+            "features": [{
+                "attributes": {"id": 1},
+                "geometry": {
+                    "rings": [[[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]],
+                    "paths": [[[0, 0], [10, 0]]],
+                },
+            }],
+        }
+        fc, meta = geo_input.normalize_geo_input(geojson=payload)
+        geom = fc["features"][0]["geometry"]
+        self.assertEqual(geom["type"], "Polygon")
+        self.assertNotIn("paths", geom)
+        reasons = (meta.get("esri_simplified_reasons") or {})
+        flat = [r for rs in reasons.values() for r in rs]
+        self.assertNotIn("paths_converted", flat)
+        codes = [a["code"] for a in meta.get("input_alerts") or []]
+        self.assertNotIn("GEOMETRY_INVALID", codes)
+
+    def test_g2_curve_rings_not_detected_as_esri(self):
+        geom = {"curveRings": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}
+        self.assertFalse(geo_input._geometry_looks_esri(geom))
+        self.assertFalse(geo_input._has_esri_geometry_keys(geom))
+        payload = {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "properties": {},
+                "geometry": geom,
+            }],
+        }
+        fc, meta = geo_input.normalize_geo_input(geojson=payload)
+        self.assertFalse(meta.get("esri_converted"))
+        codes = [a["code"] for a in meta.get("input_alerts") or []]
+        self.assertNotIn("GEOMETRY_SIMPLIFIED", codes)
+
+    def test_g3_self_intersecting_ring_still_gets_area(self):
+        feat = {
+            "type": "Feature",
+            "properties": {},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[0, 0], [1, 1], [0, 1], [1, 0], [0, 0]]],
+            },
+        }
+        stats = geo_geometry.geometry_stats(feat, 0)
+        self.assertNotIn("error", stats)
+        self.assertIsNotNone(stats.get("area_m2"))
+
+    def test_g4_unclosed_three_vertex_ring_still_gets_area(self):
+        feat = {
+            "type": "Feature",
+            "properties": {},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]],
+            },
+        }
+        stats = geo_geometry.geometry_stats(feat, 0)
+        self.assertNotIn("error", stats)
+        self.assertGreater(stats.get("area_m2") or 0, 0)
+        alerts = geo_input.build_geometry_invalid_alerts([stats], 1)
+        self.assertFalse(any(a["code"] == "GEOMETRY_INVALID" for a in alerts))
 
 
 class MergeAndAdminTests(unittest.TestCase):
@@ -795,7 +932,7 @@ class MergeAndAdminTests(unittest.TestCase):
 
         with mock.patch.object(geo_clients, "get_http", return_value=Fake()):
             with mock.patch.dict(os.environ, {"AMAP_KEY": "k", "BAIDU_AK": "k"}):
-                mcp_server.analyze_regions(
+                analysis.analyze_regions(
                     {"type": "FeatureCollection", "features": [SQUARE]},
                     search_projects=False,
                     search_poi=True,
@@ -839,7 +976,7 @@ class MergeAndAdminTests(unittest.TestCase):
             })
         with mock.patch.object(geo_clients, "get_http", return_value=fake):
             with mock.patch.dict(os.environ, {"AMAP_KEY": "k", "BAIDU_AK": "k"}):
-                mcp_server.analyze_regions(
+                analysis.analyze_regions(
                     {"type": "FeatureCollection", "features": features},
                     search_projects=True,
                     search_poi=True,
@@ -896,7 +1033,7 @@ class RateLimitSummaryTests(unittest.TestCase):
                     {"source": "osm", "status": "empty"},
                 ],
             })
-        summary = mcp_server.summarize_online_channels(features)
+        summary = evidence.summarize_online_channels(features)
         self.assertTrue(summary["batch_retry_recommended"])
         self.assertIn("rate_limit", summary)
         self.assertAlmostEqual(summary["rate_limit"]["amap"]["feature_ratio"], 0.1)
@@ -909,8 +1046,8 @@ class RateLimitSummaryTests(unittest.TestCase):
                 "index": i,
                 "sources": [amap, {"source": "baidu", "status": "empty"}, {"source": "osm", "status": "empty"}],
             })
-        with mock.patch.object(mcp_server, "RATE_LIMIT_BATCH_RATIO", 0.15):
-            summary = mcp_server.summarize_online_channels(features)
+        with mock.patch.object(evidence, "RATE_LIMIT_BATCH_RATIO", 0.15):
+            summary = evidence.summarize_online_channels(features)
         self.assertFalse(summary["batch_retry_recommended"])
 
 
@@ -973,7 +1110,7 @@ TEST3_PATH = os.path.join(ROOT, "tests", "fixtures", "test3.local.json")
 @unittest.skipUnless(os.path.exists(TEST3_PATH), "test3.local.json not present")
 class Test3GroundTruthTests(unittest.TestCase):
     def test_all_25_features_centroid_and_area(self):
-        from geo_geometry import deg_to_m_factors
+        from geo_core.geometry import deg_to_m_factors
 
         with open(TEST3_PATH, encoding="utf-8") as f:
             fc = json.loads(f.read())
@@ -983,7 +1120,7 @@ class Test3GroundTruthTests(unittest.TestCase):
                 pr = feat["properties"]
                 ax, ay = float(pr["X"]), float(pr["Y"])
                 expected_area = float(pr["Area"])
-                stats = mcp_server.geometry_stats(feat, i)
+                stats = geo_geometry.geometry_stats(feat, i)
                 mx, my = deg_to_m_factors(ay)
                 dist = ((stats["centroid"]["lon"] - ax) * mx) ** 2 + ((stats["centroid"]["lat"] - ay) * my) ** 2
                 self.assertLess(dist ** 0.5, 1.0, msg=f"FID {pr.get('FID')} centroid {dist ** 0.5:.2f} m")
@@ -1123,7 +1260,7 @@ class ExpandDedupTests(unittest.TestCase):
                 with mock.patch.object(geo_clients, "get_http", return_value=Fake()):
                     with mock.patch.object(geo_clients, "query_amap", wrap_amap):
                         with mock.patch.object(geo_clients, "query_baidu", wrap_baidu):
-                            mcp_server.analyze_regions(
+                            analysis.analyze_regions(
                                 {"type": "FeatureCollection", "features": [SQUARE]},
                                 search_projects=True,
                                 search_poi=True,
@@ -1155,7 +1292,7 @@ class ExpandDedupTests(unittest.TestCase):
             with mock.patch.object(geo_clients, "OSM_ENABLED", False):
                 with mock.patch.object(geo_clients, "get_http", return_value=Fake()):
                     with mock.patch.object(geo_clients, "query_amap", wrap_amap):
-                        mcp_server.analyze_regions(
+                        analysis.analyze_regions(
                             {"type": "FeatureCollection", "features": [SQUARE]},
                             search_projects=True,
                             search_poi=True,
@@ -1179,11 +1316,11 @@ class ExpandDedupTests(unittest.TestCase):
         def fake_osm(lat, lon, radius):
             return geo_clients._source_shell("osm", status="empty")
 
-        with mock.patch.object(mcp_server, "query_amap", fake_amap):
-            with mock.patch.object(mcp_server, "query_baidu", fake_baidu):
-                with mock.patch.object(mcp_server, "overpass_query", fake_osm):
-                    with mock.patch.object(mcp_server, "maybe_regeo_amap", lambda src, lat, lon: src):
-                        with mock.patch.object(mcp_server, "maybe_regeo_baidu", lambda src, lat, lon: src):
+        with mock.patch.object(evidence, "query_amap", fake_amap):
+            with mock.patch.object(evidence, "query_baidu", fake_baidu):
+                with mock.patch.object(evidence, "overpass_query", fake_osm):
+                    with mock.patch.object(evidence, "maybe_regeo_amap", lambda src, lat, lon: src):
+                        with mock.patch.object(evidence, "maybe_regeo_baidu", lambda src, lat, lon: src):
                             mcp_server.handle_tool(
                                 "search_project_evidence",
                                 {"lat": 23.1, "lon": 113.2, "radius_m": 300, "expand_if_empty": True},
@@ -1230,13 +1367,13 @@ class PageUrlTests(unittest.TestCase):
                 "page_url": "https://uri.amap.com/poidetail?poiid=B000AAFAC5",
             }],
         }]
-        pe = mcp_server.project_evidence_from_sources(sources)
+        pe = evidence.project_evidence_from_sources(sources)
         self.assertEqual(pe[0]["page_url"], "https://uri.amap.com/poidetail?poiid=B000AAFAC5")
 
 
 class MaxWorkersTests(unittest.TestCase):
     def test_requested_eight_clamped_to_four(self):
-        out = mcp_server.analyze_regions(
+        out = analysis.analyze_regions(
             geojson={"type": "FeatureCollection", "features": [SQUARE]},
             search_projects=False,
             search_poi=False,
@@ -1257,7 +1394,7 @@ class OutputPathTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             dest = os.path.join(td, "out.json")
-            summary = mcp_server.analyze_regions(
+            summary = analysis.analyze_regions(
                 geojson={"type": "FeatureCollection", "features": [SQUARE]},
                 search_projects=False,
                 search_poi=False,
@@ -1282,7 +1419,7 @@ class OutputPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             dest = os.path.join(td, "missing-parent", "out.json")
             with self.assertRaises(ValueError) as ctx:
-                mcp_server.analyze_regions(
+                analysis.analyze_regions(
                     geojson={"type": "FeatureCollection", "features": [SQUARE]},
                     search_projects=False,
                     search_poi=False,
@@ -1299,7 +1436,7 @@ class OutputPathTests(unittest.TestCase):
             os.makedirs(env["GEO_INPUT_ROOT"], exist_ok=True)
             with mock.patch.dict(os.environ, env, clear=False):
                 with self.assertRaises(ValueError) as ctx:
-                    mcp_server.analyze_regions(
+                    analysis.analyze_regions(
                         geojson={"type": "FeatureCollection", "features": [SQUARE]},
                         search_projects=False,
                         search_poi=False,
@@ -1310,9 +1447,14 @@ class OutputPathTests(unittest.TestCase):
 
 class VersionSsotTests(unittest.TestCase):
     def test_server_version_from_version_module(self):
-        import version
+        import tomllib
+        from pathlib import Path
 
-        self.assertEqual(version.SERVER_VERSION, "2.5.4")
+        from geo_core import version
+
+        pyproject = tomllib.loads(Path(ROOT, "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(version.SERVER_VERSION, "2.7.0")
+        self.assertEqual(pyproject["project"]["version"], version.SERVER_VERSION)
         self.assertEqual(mcp_server.SERVER_VERSION, version.SERVER_VERSION)
         self.assertEqual(geo_clients.SERVER_VERSION, version.SERVER_VERSION)
         ua = geo_clients.get_http().client.headers.get("User-Agent", "")

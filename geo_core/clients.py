@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 
-from version import SERVER_VERSION
+from .version import SERVER_VERSION
 
 
 def _env_float(name: str, default: float) -> float:
@@ -99,7 +99,7 @@ PI = math.pi
 A = 6378245.0
 EE = 0.00669342162296594323
 
-from geo_geometry import deg_to_m_factors  # noqa: E402
+from .geometry import deg_to_m_factors  # noqa: E402
 
 
 def _out_of_china(lon: float, lat: float) -> bool:

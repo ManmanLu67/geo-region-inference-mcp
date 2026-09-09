@@ -23,7 +23,8 @@ related_projects                   （最终目标）
 ```text
 Agent / LLM
     ├── Skill（流程、证据优先级、置信度、输出结构）→ SKILL.md
-    └── MCP Server（几何、CRS、并发 API、校验）→ mcp_server.py
+    └── MCP adapter（协议：Tool 注册 / 参数转换 / 错误映射）→ mcp_server.py
+            └── geo_core（几何、CRS、并发 API、证据、校验）
 ```
 
 正常路径一次 `analyze_regions` 处理整批地物，可选 `prepare_gov_web_search` + Agent Web 检索，再语义推理与 `validate_result`。详见 [SKILL.md](SKILL.md)。
@@ -39,15 +40,19 @@ geo-region-inference/
 ├── SKILL.md                         # Agent 工作流（执行推断读此）
 ├── README.md                        # 本文件：概览与文档地图
 ├── MCP_SETUP.md                     # 安装、Host 配置、stdio 启动
-├── version.py                       # SERVER_VERSION 单一事实源
 ├── mcp_config.example.json          # Host 配置示例
-├── mcp_server.py                    # MCP Server
-├── geo_input.py                     # GeoJSON 加载、CRS、Esri 误传检测
-├── geo_geometry.py                  # 权威几何统计
-├── geo_clients.py                   # httpx / 高德 / 百度 / OSM
-├── gov_search.py                    # 政府 Web 四轮 query 计划（无 HTTP）
-├── validation.py                    # 输出 Schema 校验
-├── requirements-mcp.txt             # httpx + pyproj；含 PyPI 镜像选项
+├── mcp_server.py                    # MCP 薄适配层（协议）
+├── geo_core/                        # 业务核心（无 MCP 协议）
+│   ├── __init__.py                  # 门面 re-export
+│   ├── analysis.py                  # analyze_regions / calculate_geometry 编排
+│   ├── evidence.py                  # 项目证据抽取与摘要
+│   ├── inputs.py                    # GeoJSON 加载、CRS、Esri 误传检测
+│   ├── geometry.py                  # 权威几何统计
+│   ├── clients.py                   # httpx / 高德 / 百度 / OSM
+│   ├── gov_search.py                # 政府 Web 四轮 query 计划（无 HTTP）
+│   ├── validation.py                # 输出 Schema 校验
+│   └── version.py                   # SERVER_VERSION 单一事实源
+├── pyproject.toml                   # 依赖声明：httpx + pyproj + mcp-types（packages=[]）
 ├── pip.ini.example                  # 可选全局 pip 镜像示例
 ├── tests/
 │   ├── test_offline.py
@@ -79,7 +84,7 @@ geo-region-inference/
 
 ## 5. 快速开始
 
-1. 安装：见 [MCP_SETUP.md](MCP_SETUP.md)（`pip install -r requirements-mcp.txt`，持久 `.venv`）。
+1. 安装：见 [MCP_SETUP.md](MCP_SETUP.md)（`pip install -e .`，持久 `.venv`）。
 2. 配置 Host：指向 `.venv` 的 Python + `mcp_server.py`；`env` 注入 `AMAP_KEY` / `BAIDU_AK` 等（见 [map_api_setup.md](references/map_api_setup.md)）。
 3. Agent 按 [SKILL.md](SKILL.md) 执行：`analyze_regions` →（可选 gov Web）→ 推理 → `validate_result`。
 

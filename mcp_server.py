@@ -1,55 +1,50 @@
 #!/usr/bin/env python3
 """
-geo-region-inference MCP server.
+geo-region-inference MCP adapter.
 
-GIS/API work stays in geo_clients.py (sync httpx singleton). This module is
-geometry, tool orchestration, and the stdio JSON-RPC surface.
+Thin stdio JSON-RPC surface: tool registration, argument mapping, core calls,
+error wrapping. Business logic lives in geo_core.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
-from geo_clients import (
-    EXPAND_RADIUS_FACTOR,
-    EXPAND_RADIUS_MAX_M,
-    LAST_RETRY_AFTER_MS,
-    PROJECT_KEYWORDS,
-    RATE_LIMIT,
-    RATE_LIMIT_BATCH_RATIO,
+from mcp_types import (
+    Implementation,
+    InitializeResult,
+    ListToolsResult,
+    ServerCapabilities,
+    Tool,
+    ToolsCapability,
+)
+from mcp_types.jsonrpc import (
+    METHOD_NOT_FOUND,
+    PARSE_ERROR,
+    JSONRPCError,
+    JSONRPCResponse,
+)
+from mcp_types.methods import serialize_server_result
+from mcp_types.version import (
+    HANDSHAKE_PROTOCOL_VERSIONS,
+    LATEST_HANDSHAKE_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+)
+
+from geo_core import (
+    SERVER_VERSION,
+    analyze_regions,
+    calculate_geometry,
+    check_api_status,
     close_http,
-    maybe_regeo_amap,
-    maybe_regeo_baidu,
-    merge_source_records,
-    overpass_query,
-    overpass_query_batch,
-    probe_api_status,
-    project_signal,
-    query_amap,
-    query_baidu,
-    run_amap_baidu_job_batches,
-    apply_regeo_for_jobs,
+    prepare_gov_web_search,
+    search_project_evidence,
+    validate_result,
 )
-from geo_geometry import feature_list, geometry_stats, radius_from_stats
-from geo_input import (
-    build_geometry_invalid_alerts,
-    normalize_geo_input,
-    scan_residual_esri_geometry,
-    validate_geometry_fail_fast,
-    validate_output_path,
-)
-from gov_search import prepare_gov_web_search
-from validation import schema_data_source, validate_payload
-from version import SERVER_VERSION
 
 SERVER_NAME = "geo-region-inference"
-_CHANNEL_RANK = {"ok": 4, "empty": 3, "error": 2, "unavailable": 1}
-MAX_FEATURES = 80
-PROTOCOL_VERSION = "2026-07-28"
-LEGACY_PROTOCOL_VERSION = "2025-11-25"
 
 
 def log(msg: str) -> None:
@@ -74,397 +69,6 @@ def err(message: str, details: Any | None = None) -> dict[str, Any]:
     if details is not None:
         payload["details"] = details
     return json_result(payload, True)
-
-
-def geometry_pipeline(feats: list[dict[str, Any]], input_alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Shared stats + residual Esri scan + fail-fast + GEOMETRY_INVALID alerts."""
-    if len(feats) > MAX_FEATURES:
-        raise ValueError(f"feature_count {len(feats)} exceeds limit {MAX_FEATURES}")
-    stats = [geometry_stats(f, i) for i, f in enumerate(feats)]
-    structure_reasons = scan_residual_esri_geometry(feats)
-    validate_geometry_fail_fast(stats, len(feats), structure_reasons=structure_reasons)
-    input_alerts.extend(
-        build_geometry_invalid_alerts(stats, len(feats), structure_reasons=structure_reasons)
-    )
-    return stats
-
-
-def _source_lacks_project_evidence(src: dict[str, Any] | None, direct: list[dict[str, Any]]) -> bool:
-    if not src or src.get("status") == "unavailable":
-        return False
-    name = src.get("source")
-    return not any(x.get("source") == name for x in direct)
-
-
-def project_evidence_from_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for src in sources:
-        name = src.get("source")
-        for item in src.get("items", []):
-            if project_signal(item):
-                label = item.get("name") or item.get("address") or item.get("type")
-                if label and label not in seen:
-                    seen.add(label)
-                    rec = {"label": label, "source": name, "evidence": item}
-                    if item.get("page_url"):
-                        rec["page_url"] = item["page_url"]
-                    out.append(rec)
-        for item in src.get("project_signals", []):
-            label = item.get("name")
-            if label and label not in seen:
-                seen.add(label)
-                rec = {"label": label, "source": name, "evidence": item}
-                if item.get("page_url"):
-                    rec["page_url"] = item["page_url"]
-                out.append(rec)
-    return out[:30]
-
-
-def _compact_source(c: dict[str, Any], direct: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "source": c.get("source"),
-        "status": c.get("status"),
-        "reason_code": c.get("reason_code"),
-        "reason": c.get("reason"),
-        "count": c.get("count"),
-        "radius_m": c.get("radius_m"),
-        "expanded_radius_m": c.get("expanded_radius_m"),
-        "project_signal_count": len(c.get("project_signals", [])),
-        "landuse": c.get("landuse", [])[:12],
-        "buildings": c.get("buildings", {}),
-        "amenities": c.get("amenities", [])[:12],
-        "roads": c.get("roads", [])[:10],
-        "places": c.get("places", [])[:10],
-        "items": c.get("items", [])[:12],
-        "project_evidence": [x for x in direct if x.get("source") == c.get("source")][:10],
-    }
-
-
-def summarize_online_channels(features: list[dict[str, Any]]) -> dict[str, Any]:
-    channels: dict[str, dict[str, Any]] = {}
-    feature_count = len(features)
-    rate_limit: dict[str, dict[str, Any]] = {}
-    for name in ("amap", "baidu", "osm"):
-        best: dict[str, Any] | None = None
-        best_rank = 0
-        rl_count = 0
-        for feat in features:
-            for src in feat.get("sources") or []:
-                if src.get("source") != name:
-                    continue
-                if src.get("reason_code") == RATE_LIMIT:
-                    rl_count += 1
-                status = str(src.get("status") or "unavailable")
-                rank = _CHANNEL_RANK.get(status, 0)
-                if rank > best_rank:
-                    best_rank = rank
-                    best = src
-        ratio = (rl_count / feature_count) if feature_count else 0.0
-        rate_limit[name] = {
-            "feature_count": rl_count,
-            "feature_ratio": round(ratio, 4),
-            "retry_after_hint_ms": LAST_RETRY_AFTER_MS.get(name, 0),
-        }
-        if best:
-            channels[name] = {
-                "status": best.get("status"),
-                "reason_code": best.get("reason_code"),
-                "reason": best.get("reason"),
-            }
-        else:
-            channels[name] = {"status": "unavailable", "reason_code": None, "reason": "no query attempted"}
-    warnings: list[str] = []
-    for name, info in channels.items():
-        status = info.get("status")
-        reason = info.get("reason") or info.get("reason_code") or status
-        if status in ("unavailable", "error"):
-            label = {"amap": "高德", "baidu": "百度", "osm": "OSM"}.get(name, name)
-            warnings.append(f"{label}: {reason}")
-        rl = rate_limit.get(name, {})
-        if rl.get("feature_count", 0) > 0:
-            label = {"amap": "高德", "baidu": "百度", "osm": "OSM"}.get(name, name)
-            warnings.append(f"{label}: {rl['feature_count']} 个地物遭遇限流（已自动退避重试）")
-    usable = sum(1 for c in channels.values() if c.get("status") in ("ok", "empty"))
-    all_failed = usable == 0
-    user_message = None
-    if all_failed:
-        user_message = (
-            "所有在线数据源均不可用，结果仅为离线几何统计；请配置 AMAP_KEY / BAIDU_AK 或检查 Overpass 连通性。"
-        )
-    batch_retry_recommended = False
-    batch_retry_reason = None
-    for name, rl in rate_limit.items():
-        if rl.get("feature_ratio", 0) >= RATE_LIMIT_BATCH_RATIO:
-            batch_retry_recommended = True
-            batch_retry_reason = f"{name} rate_limit ratio {rl['feature_ratio']} >= threshold {RATE_LIMIT_BATCH_RATIO}"
-            break
-    return {
-        "channels": channels,
-        "rate_limit": rate_limit,
-        "batch_retry_recommended": batch_retry_recommended,
-        "batch_retry_reason": batch_retry_reason,
-        "all_channels_unavailable": all_failed,
-        "warnings": warnings,
-        "user_message": user_message,
-    }
-
-
-def _effective_max_workers(max_workers: int) -> int:
-    return min(max(int(max_workers), 1), 4)
-
-
-def _slim_project_evidence(direct: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for x in direct:
-        rec: dict[str, Any] = {"label": x.get("label"), "source": x.get("source")}
-        if x.get("page_url"):
-            rec["page_url"] = x["page_url"]
-        out.append(rec)
-    return out
-
-
-def _slim_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "source": s.get("source"),
-            "status": s.get("status"),
-            "reason_code": s.get("reason_code"),
-            "count": s.get("count"),
-            "project_signal_count": s.get("project_signal_count"),
-            "expanded_radius_m": s.get("expanded_radius_m"),
-        }
-        for s in sources
-    ]
-
-
-def summarize_analyze_result(full: dict[str, Any], output_path: str) -> dict[str, Any]:
-    features: list[dict[str, Any]] = []
-    for feat in full.get("features") or []:
-        row = {k: v for k, v in feat.items() if k not in ("sources", "project_evidence")}
-        row["project_evidence"] = _slim_project_evidence(feat.get("project_evidence") or [])
-        row["sources"] = _slim_sources(feat.get("sources") or [])
-        features.append(row)
-    summary: dict[str, Any] = {
-        "server": full.get("server"),
-        "server_version": full.get("server_version"),
-        "output_path": output_path,
-        "output_written": True,
-        "feature_count": full.get("feature_count"),
-        "effective_max_workers": full.get("effective_max_workers"),
-        "input_meta": full.get("input_meta"),
-        "input_alerts": full.get("input_alerts"),
-        "features": features,
-    }
-    if "online_summary" in full:
-        summary["online_summary"] = full["online_summary"]
-    return summary
-
-
-def assemble_feature_result(
-    radius: float,
-    sources: list[dict[str, Any]],
-    *,
-    expanded_radius_used: bool,
-    expanded_radius_found_project: bool,
-    project_evidence: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    usable = [c for c in sources if c.get("status") == "ok"]
-    source_names = [c.get("source") for c in usable]
-    direct = project_evidence if project_evidence is not None else project_evidence_from_sources(sources)
-    return {
-        "radius_m": radius,
-        "expanded_radius_used": expanded_radius_used,
-        "expanded_radius_found_project": expanded_radius_found_project,
-        "data_source": schema_data_source(source_names),
-        "project_evidence": direct,
-        "sources": [_compact_source(c, direct) for c in sources],
-    }
-
-
-def _amap_baidu_for_jobs(
-    jobs: list[tuple[int, float, float, float]],
-    keywords: str | None,
-    max_workers: int,
-) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
-    return run_amap_baidu_job_batches(jobs, keywords, max_workers)
-
-
-def analyze_regions(
-    geojson: dict[str, Any] | None = None,
-    *,
-    input_path: str | None = None,
-    search_projects: bool = True,
-    search_poi: bool = True,
-    expand_radius_if_needed: bool = True,
-    max_workers: int = 4,
-    output_path: str | None = None,
-) -> dict[str, Any]:
-    workers = _effective_max_workers(max_workers)
-    fc, input_meta = normalize_geo_input(geojson=geojson, input_path=input_path)
-    input_alerts = list(input_meta.get("input_alerts") or [])
-    feats = feature_list(fc)
-    stats = geometry_pipeline(feats, input_alerts)
-    jobs: list[tuple[int, float, float, float]] = []
-    for s in stats:
-        if "centroid" not in s:
-            continue
-        radius = radius_from_stats(s)
-        jobs.append((s["index"], s["centroid"]["lat"], s["centroid"]["lon"], radius))
-
-    want_net = search_projects or search_poi
-    keywords = PROJECT_KEYWORDS if search_projects else None
-    amap_by: dict[int, dict[str, Any]] = {}
-    baidu_by: dict[int, dict[str, Any]] = {}
-    osm_by: dict[int, dict[str, Any]] = {}
-    if want_net and jobs:
-        amap_by, baidu_by = _amap_baidu_for_jobs(jobs, keywords, workers)
-        osm_by = overpass_query_batch([(idx, lat, lon, radius) for idx, lat, lon, radius in jobs])
-        regeo_cache: dict[tuple[str, float, float], list[dict[str, Any]]] = {}
-        apply_regeo_for_jobs(jobs, amap_by, baidu_by, regeo_cache)
-
-    pending: dict[int, dict[str, Any]] = {}
-    expand_amap_jobs: list[tuple[int, float, float, float]] = []
-    expand_baidu_jobs: list[tuple[int, float, float, float]] = []
-    expand_osm_jobs: list[tuple[int, float, float, float]] = []
-    for idx, lat, lon, radius in jobs:
-        sources = [s for s in (amap_by.get(idx), baidu_by.get(idx), osm_by.get(idx)) if s]
-        direct = project_evidence_from_sources(sources) if search_projects else []
-        want_expand = bool(expand_radius_if_needed and search_projects and not direct)
-        expanded_r = min(radius * EXPAND_RADIUS_FACTOR, EXPAND_RADIUS_MAX_M) if want_expand else None
-        do_amap = bool(want_expand and _source_lacks_project_evidence(amap_by.get(idx), direct))
-        do_baidu = bool(want_expand and _source_lacks_project_evidence(baidu_by.get(idx), direct))
-        do_osm = bool(want_expand and _source_lacks_project_evidence(osm_by.get(idx), direct))
-        need_expand = bool(do_amap or do_baidu or do_osm)
-        pending[idx] = {"sources": sources, "need_expand": need_expand, "direct": direct}
-        if need_expand and expanded_r is not None:
-            job = (idx, lat, lon, expanded_r)
-            if do_amap:
-                expand_amap_jobs.append(job)
-            if do_baidu:
-                expand_baidu_jobs.append(job)
-            if do_osm:
-                expand_osm_jobs.append(job)
-
-    exp_amap: dict[int, dict[str, Any]] = {}
-    exp_baidu: dict[int, dict[str, Any]] = {}
-    exp_osm: dict[int, dict[str, Any]] = {}
-    if expand_amap_jobs or expand_baidu_jobs:
-        exp_amap, exp_baidu = run_amap_baidu_job_batches(
-            expand_amap_jobs or expand_baidu_jobs,
-            PROJECT_KEYWORDS,
-            workers,
-            query_amap_jobs=expand_amap_jobs,
-            query_baidu_jobs=expand_baidu_jobs,
-        )
-    if expand_osm_jobs:
-        exp_osm = overpass_query_batch([(idx, lat, lon, r) for idx, lat, lon, r in expand_osm_jobs])
-
-    results: dict[int, dict[str, Any]] = {}
-    for idx, _lat, _lon, radius in jobs:
-        info = pending[idx]
-        sources = info["sources"]
-        expanded_used = bool(info["need_expand"])
-        expanded_r = min(radius * EXPAND_RADIUS_FACTOR, EXPAND_RADIUS_MAX_M) if expanded_used else None
-        if expanded_used:
-            merged = []
-            by_name = {s.get("source"): s for s in sources}
-            for name, getter in (("amap", exp_amap), ("baidu", exp_baidu), ("osm", exp_osm)):
-                base = by_name.get(name)
-                extra = getter.get(idx)
-                if base is None and extra is None:
-                    continue
-                if base is None:
-                    extra = dict(extra)
-                    extra["radius_m"] = radius
-                    extra["expanded_radius_m"] = expanded_r
-                    merged.append(extra)
-                else:
-                    merged.append(merge_source_records(base, extra, radius, expanded_r))
-            sources = merged
-            direct = project_evidence_from_sources(sources)
-        else:
-            tagged = []
-            for s in sources:
-                rec = dict(s)
-                rec["radius_m"] = radius
-                rec["expanded_radius_m"] = None
-                tagged.append(rec)
-            sources = tagged
-            direct = info["direct"] if search_projects else project_evidence_from_sources(sources)
-        results[idx] = assemble_feature_result(
-            radius,
-            sources,
-            expanded_radius_used=expanded_used,
-            expanded_radius_found_project=bool(expanded_used and direct),
-            project_evidence=direct,
-        )
-
-    merged_out = []
-    for s in stats:
-        result = dict(s)
-        result.update(
-            results.get(
-                s["index"],
-                {
-                    "radius_m": None,
-                    "data_source": "offline",
-                    "project_evidence": [],
-                    "sources": [],
-                    "expanded_radius_used": False,
-                    "expanded_radius_found_project": False,
-                },
-            )
-        )
-        merged_out.append(result)
-    out: dict[str, Any] = {
-        "server": SERVER_NAME,
-        "server_version": SERVER_VERSION,
-        "feature_count": len(merged_out),
-        "effective_max_workers": workers,
-        "input_meta": {k: v for k, v in input_meta.items() if k != "input_alerts"},
-        "input_alerts": input_alerts,
-        "features": merged_out,
-    }
-    if want_net:
-        out["online_summary"] = summarize_online_channels(merged_out)
-    if output_path:
-        dest = validate_output_path(Path(output_path))
-        dest.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-        return summarize_analyze_result(out, str(dest))
-    return out
-
-
-def calculate_geometry(
-    geojson: dict[str, Any] | None = None,
-    *,
-    input_path: str | None = None,
-) -> dict[str, Any]:
-    fc, input_meta = normalize_geo_input(geojson=geojson, input_path=input_path)
-    input_alerts = list(input_meta.get("input_alerts") or [])
-    feats = feature_list(fc)
-    stats = geometry_pipeline(feats, input_alerts)
-    return {
-        "feature_count": len(stats),
-        "input_meta": {k: v for k, v in input_meta.items() if k != "input_alerts"},
-        "input_alerts": input_alerts,
-        "features": stats,
-    }
-
-
-def validate_result(result: dict[str, Any]) -> dict[str, Any]:
-    return validate_payload(result)
-
-
-def check_api_status(
-    lat: float | None = None,
-    lon: float | None = None,
-    probe_mode: str = "single",
-) -> dict[str, Any]:
-    plat = float(lat if lat is not None else 39.9042)
-    plon = float(lon if lon is not None else 116.4074)
-    mode = probe_mode if probe_mode in ("single", "burst") else "single"
-    return probe_api_status(plat, plon, probe_mode=mode)
 
 
 TOOLS = {
@@ -566,17 +170,14 @@ TOOLS = {
 def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name == "analyze_regions":
         try:
-            workers = _effective_max_workers(int(args.get("max_workers", 4)))
-            geojson = args.get("geojson")
-            input_path = args.get("input_path")
             return ok(
                 analyze_regions(
-                    geojson,
-                    input_path=input_path,
+                    args.get("geojson"),
+                    input_path=args.get("input_path"),
                     search_projects=bool(args.get("search_projects", True)),
                     search_poi=bool(args.get("search_poi", True)),
                     expand_radius_if_needed=bool(args.get("expand_radius_if_needed", True)),
-                    max_workers=workers,
+                    max_workers=int(args.get("max_workers", 4)),
                     output_path=args.get("output_path") or None,
                 )
             )
@@ -593,36 +194,17 @@ def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         except ValueError as e:
             return err(str(e))
     if name == "search_project_evidence":
-        lat, lon, radius = float(args["lat"]), float(args["lon"]), float(args.get("radius_m", 300))
-        amap = maybe_regeo_amap(query_amap(lat, lon, radius, PROJECT_KEYWORDS), lat, lon)
-        baidu = maybe_regeo_baidu(query_baidu(lat, lon, radius, PROJECT_KEYWORDS), lat, lon)
-        osm = overpass_query(lat, lon, radius)
-        sources = [amap, baidu, osm]
-        direct = project_evidence_from_sources(sources)
-        expanded_r = None
-        if not direct and bool(args.get("expand_if_empty", True)):
-            expanded_cand = min(radius * EXPAND_RADIUS_FACTOR, EXPAND_RADIUS_MAX_M)
-            extra_amap = None if amap.get("status") == "unavailable" else query_amap(lat, lon, expanded_cand, PROJECT_KEYWORDS)
-            extra_baidu = None if baidu.get("status") == "unavailable" else query_baidu(lat, lon, expanded_cand, PROJECT_KEYWORDS)
-            extra_osm = None if osm.get("status") == "unavailable" else overpass_query(lat, lon, expanded_cand)
-            if extra_amap is not None or extra_baidu is not None or extra_osm is not None:
-                expanded_r = expanded_cand
-                sources = [
-                    merge_source_records(amap, extra_amap, radius, expanded_r),
-                    merge_source_records(baidu, extra_baidu, radius, expanded_r),
-                    merge_source_records(osm, extra_osm, radius, expanded_r),
-                ]
-                direct = project_evidence_from_sources(sources)
-        return ok(
-            {
-                "center": {"lat": lat, "lon": lon},
-                "initial_radius_m": radius,
-                "expanded_search_used": expanded_r is not None,
-                "expanded_radius_found_project": bool(expanded_r is not None and direct),
-                "project_evidence": direct,
-                "sources": [_compact_source(s, direct) for s in sources],
-            }
-        )
+        try:
+            return ok(
+                search_project_evidence(
+                    float(args["lat"]),
+                    float(args["lon"]),
+                    radius_m=float(args.get("radius_m", 300)),
+                    expand_if_empty=bool(args.get("expand_if_empty", True)),
+                )
+            )
+        except (ValueError, KeyError) as e:
+            return err(str(e))
     if name == "validate_result":
         return ok(validate_result(args["result"]))
     if name == "prepare_gov_web_search":
@@ -647,24 +229,30 @@ def handle_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def capabilities() -> dict[str, Any]:
-    return {"tools": {"listChanged": False}}
+    return ServerCapabilities(tools=ToolsCapability(list_changed=False)).model_dump(
+        by_alias=True, exclude_none=True
+    )
 
 
 def response(req_id: Any, result: Any) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+    return JSONRPCResponse(jsonrpc="2.0", id=req_id, result=result).model_dump(
+        by_alias=True, exclude_none=True
+    )
 
 
 def error_response(req_id: Any, code: int, message: str, data: Any | None = None) -> dict[str, Any]:
-    out = {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+    err_body: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
-        out["error"]["data"] = data
-    return out
+        err_body["data"] = data
+    return JSONRPCError(jsonrpc="2.0", id=req_id, error=err_body).model_dump(
+        by_alias=True, exclude_none=False
+    )
 
 
 def negotiate_initialize(requested: str | None) -> str:
-    if requested == LEGACY_PROTOCOL_VERSION:
-        return LEGACY_PROTOCOL_VERSION
-    return LEGACY_PROTOCOL_VERSION
+    if requested in HANDSHAKE_PROTOCOL_VERSIONS:
+        return requested
+    return LATEST_HANDSHAKE_VERSION
 
 
 def handle_rpc(req: dict[str, Any]) -> dict[str, Any] | None:
@@ -674,8 +262,9 @@ def handle_rpc(req: dict[str, Any]) -> dict[str, Any] | None:
     method = req.get("method")
     params = req.get("params") or {}
     if method == "server/discover":
+        # DiscoverResult in mcp-types has no serverInfo; keep that field by hand.
         result = {
-            "supportedVersions": [PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+            "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
             "capabilities": capabilities(),
             "instructions": "Use analyze_regions for normal work: it batches geometry + project-oriented online evidence and returns compact evidence for semantic inference.",
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
@@ -684,25 +273,34 @@ def handle_rpc(req: dict[str, Any]) -> dict[str, Any] | None:
     if method == "initialize":
         requested = params.get("protocolVersion") if isinstance(params, dict) else None
         negotiated = negotiate_initialize(str(requested) if requested else None)
-        result = {
-            "protocolVersion": negotiated,
-            "capabilities": capabilities(),
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-            "instructions": "Use analyze_regions for normal work.",
-        }
+        init = InitializeResult(
+            protocol_version=negotiated,
+            capabilities=ServerCapabilities(tools=ToolsCapability(list_changed=False)),
+            server_info=Implementation(name=SERVER_NAME, version=SERVER_VERSION),
+            instructions="Use analyze_regions for normal work.",
+        )
+        result = serialize_server_result(
+            "initialize", negotiated, init.model_dump(by_alias=True)
+        )
         return response(req_id, result)
     if method == "notifications/initialized":
         return None
     if method == "tools/list":
-        return response(
-            req_id,
-            {"tools": [{"name": n, "description": v["description"], "inputSchema": v["inputSchema"]} for n, v in TOOLS.items()]},
+        listed = ListToolsResult(
+            tools=[
+                Tool(name=n, description=v["description"], input_schema=v["inputSchema"])
+                for n, v in TOOLS.items()
+            ]
         )
+        result = serialize_server_result(
+            "tools/list", LATEST_HANDSHAKE_VERSION, listed.model_dump(by_alias=True)
+        )
+        return response(req_id, result)
     if method == "tools/call":
         name = params.get("name")
         args = params.get("arguments") or {}
         return response(req_id, handle_tool(name, args))
-    return error_response(req_id, -32601, f"Method not found: {method}")
+    return error_response(req_id, METHOD_NOT_FOUND, f"Method not found: {method}")
 
 
 def main() -> None:
@@ -715,7 +313,7 @@ def main() -> None:
             try:
                 req = json.loads(raw)
             except json.JSONDecodeError as e:
-                print(json.dumps(error_response(None, -32700, "Parse error", str(e))), flush=True)
+                print(json.dumps(error_response(None, PARSE_ERROR, "Parse error", str(e))), flush=True)
                 continue
             try:
                 out = handle_rpc(req)

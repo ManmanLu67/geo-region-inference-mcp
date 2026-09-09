@@ -9,7 +9,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from geo_clients import gcj02_to_bd09, wgs84_to_bd09, wgs84_to_gcj02  # noqa: E402
+from geo_core.clients import gcj02_to_bd09, wgs84_to_bd09, wgs84_to_gcj02  # noqa: E402
 
 FUNCS = {
     "wgs84_to_gcj02": wgs84_to_gcj02,

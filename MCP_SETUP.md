@@ -7,10 +7,8 @@ The Skill is the semantic workflow layer. The MCP server is the long-lived tool 
 ```text
 Agent / LLM
    +-- geo-region-inference Skill (SKILL.md)
-   +-- MCP (mcp_server.py)
-         +-- geo_input.py / geo_geometry.py
-         +-- gov_search.py
-         +-- geo_clients.py (httpx, AMap/Baidu/OSM)
+   +-- MCP adapter (mcp_server.py)
+         +-- geo_core (GIS / API / evidence / validation)
 ```
 
 Normal path: one `analyze_regions` call per batch, not one Python process per feature/source.
@@ -27,18 +25,30 @@ python -m venv .venv
 .venv\Scripts\activate
 # macOS/Linux
 source .venv/bin/activate
-pip install -r requirements-mcp.txt
+pip install -e .
 ```
 
-`requirements-mcp.txt` includes Tsinghua PyPI mirror options for CN users. If that mirror times out:
+Declared in `pyproject.toml`: **httpx** + **pyproj** (CRS only; no GDAL) + **mcp-types** (pulls **pydantic**). Protocol types come from `mcp-types`; the stdio transport is still the handwritten loop in `mcp_server.py`. There is **no** `starlette` / `uvicorn` / official `mcp` HTTP stack.
+
+CN mirrors: [`pip.ini.example`](pip.ini.example) (Tsinghua). If that times out:
 
 ```bash
-pip install -r requirements-mcp.txt --index-url https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+pip install -e . --index-url https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
 ```
 
-See [`pip.ini.example`](pip.ini.example) for optional global pip mirror config.
+### Dependency footprint (measured)
 
-Runtime: **httpx** + **pyproj** (CRS only; no GDAL). No official `mcp` SDK.
+Clean venv, `pip install -e .`, Windows CPython 3.12 amd64, 2026-09-09 (Aliyun index; Tsinghua timed out). Bytes via walking `Lib/site-packages` files. Total includes the venv’s `pip`. There is **no** `starlette` / `uvicorn`.
+
+| Scope | Bytes | MB (1024²) |
+|-------|------:|----------:|
+| `site-packages` total | 52,579,908 | 50.2 |
+| `httpx` + `httpcore` / `h11` / `idna` / `certifi` / `anyio` | 3,411,741 | 3.3 |
+| `pyproj` (+ `pyproj.libs`) | 27,527,465 | 26.3 |
+| `pydantic` + `pydantic_core` / `annotated_types` / `typing_inspection` | 9,325,317 | 8.9 |
+| `mcp_types` | 625,311 | 0.6 |
+
+`pyproj` dominates. `pydantic` is the cost of `mcp-types`. Use this table if someone later proposes the full `mcp` package (starlette stack).
 
 ## Run
 
@@ -48,7 +58,13 @@ python mcp_server.py
 
 Stdio transport; stays alive until the MCP host closes the connection.
 
-**修改 `geo_geometry.py` / `mcp_server.py` / `geo_input.py` / `geo_clients.py` / `gov_search.py` 后必须重启 MCP 宿主**（stdio 常驻进程不热加载）。重启后，若证据筛选规则（如 `project_evidence`）有变动，已产出但未定稿的结论须重新跑 `analyze_regions`（及后续 gov 检索/校验）再核验，**禁止直接沿用旧结果**。
+**Cancellation:** the adapter is a **synchronous** `sys.stdin` loop. A long-running `analyze_regions` call cannot be cancelled mid-flight when the host disconnects; the process finishes the current `handle_tool` before `close_http()` in `finally`.
+
+**Handshake:** `initialize` negotiates against `mcp_types.version.HANDSHAKE_PROTOCOL_VERSIONS` (latest `2025-11-25`). A client that requests `2026-07-28` is **not** echoed; the server still answers `2025-11-25`. `server/discover` lists `list(SUPPORTED_PROTOCOL_VERSIONS)` (handshake ∪ modern, including older 2024/2025 revisions from the registry — a wider table than the previous two-element tuple).
+
+Server **2.7.0** is not a protocol-breaking bump (same handshake, same tools). Later G1–G4 geometry fixes should ship as **2.8.0 / 2.9.0**, not a major version.
+
+**修改 `mcp_server.py` / `geo_core/**` 后必须重启 MCP 宿主**（stdio 常驻进程不热加载）。重启后，若证据筛选规则（如 `project_evidence`）有变动，已产出但未定稿的结论须重新跑 `analyze_regions`（及后续 gov 检索/校验）再核验，**禁止直接沿用旧结果**。
 
 ## Configure keys and env
 

@@ -9,8 +9,8 @@
 
 | 项目 | MCP 主路径 | 本目录（如 `geo_stats.py`） |
 |------|-----------|---------------------------|
-| Polygon 质心 / 面积 | shoelace **面积加权** + 局部原点；孔洞净面积 | **同算法**（复用 `geo_geometry`） |
-| CRS | `geo_input` + pyproj → WGS84 | 旧 heuristic，可能输出 `coordinate_system_warning` |
+| Polygon 质心 / 面积 | shoelace **面积加权** + 局部原点；孔洞净面积 | **同算法**（复用 `geo_core.geometry`） |
+| CRS | `geo_core.inputs` + pyproj → WGS84 | 旧 heuristic，可能输出 `coordinate_system_warning` |
 | properties | `compact_properties` 压缩 | 原样透传 |
 
 MCP 已修复小地块浮点质心 bug，且 `geo_stats.py` 环级计算与 MCP 共用。仍不推荐用于生产推断。
@@ -21,5 +21,5 @@ MCP 已修复小地块浮点质心 bug，且 `geo_stats.py` 环级计算与 MCP 
 
 ## 其他脚本
 
-- `query_*.py`、`coord_transform.py` — `geo_clients` 薄封装，与 MCP 共用 HTTP 层，**不是** Skill 正常执行路径。
-- `validate_output.py` — **DEPRECATED** 薄封装，委托 `validation.py`；Skill 正常路径用 MCP `validate_result`。
+- `query_*.py`、`coord_transform.py` — `geo_core.clients` 薄封装，与 MCP 共用 HTTP 层，**不是** Skill 正常执行路径。
+- `validate_output.py` — **DEPRECATED** 薄封装，委托 `geo_core.validation`；Skill 正常路径用 MCP `validate_result`。

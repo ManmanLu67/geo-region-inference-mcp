@@ -1,8 +1,7 @@
 ; Windows: copy to %APPDATA%\pip\pip.ini
 ; macOS/Linux: copy to ~/.pip/pip.conf  (section [global] same)
 ;
-; Optional global pip mirror. requirements-mcp.txt already sets Tsinghua for
-; `pip install -r requirements-mcp.txt`; use this file if you want all pip installs mirrored.
+; Optional global pip mirror for `pip install -e .` and other pip commands.
 [global]
 index-url = https://pypi.tuna.tsinghua.edu.cn/simple
 trusted-host = pypi.tuna.tsinghua.edu.cn

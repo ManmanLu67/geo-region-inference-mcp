@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TEMPLATES_PATH = ROOT / "references" / "gov_search_templates.json"
 
 _BUILTIN_TEMPLATES: dict[str, Any] = {
@@ -222,10 +222,10 @@ def resolve_analyze_result(
     if (analyze_result is None) == (analyze_result_path is None):
         raise ValueError("Provide exactly one of analyze_result or analyze_result_path")
     if analyze_result_path is not None:
-        from geo_input import _validate_path
+        from .inputs import validate_input_path
 
         path = Path(analyze_result_path)
-        _validate_path(path)
+        validate_input_path(path)
         with open(path, encoding="utf-8") as f:
             payload = json.load(f)
         if not isinstance(payload, dict):

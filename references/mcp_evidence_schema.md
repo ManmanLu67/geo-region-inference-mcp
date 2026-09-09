@@ -20,7 +20,7 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 
   "server": "geo-region-inference",
 
-  "server_version": "2.5.4",  // 示例值；实际以 version.py 为准
+  "server_version": "2.7.0",  // 示例值；实际以 geo_core/version.py 为准
 
   "feature_count": 2,
 
@@ -108,7 +108,7 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 
   - `GEOMETRY_INVALID`：部分/全部地物几何无效；**必须**列出 `invalid_indices`；可选 `invalid_count`、`invalid_reasons`（`residual_esri_keys` / `geometry_stat_failed`）
 
-  - `GEOMETRY_SIMPLIFIED`：Esri 有损转换；**必须**列出 `feature_indices`；可选 `simplify_reasons`（`esri_ring_roles_unresolved` / `paths_converted`）
+  - `GEOMETRY_SIMPLIFIED`：Esri 有损转换；**必须**列出 `feature_indices`；可选 `simplify_reasons`（`esri_ring_roles_unresolved` = 环穿插无法嵌套 / `paths_converted`）
 
   - 完整表见 [error_codes.md](error_codes.md)
 
@@ -418,7 +418,7 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 
 
 
-**依赖**：MCP Server 需 `pip install -r requirements-mcp.txt`（含 `pyproj` 用于 CRS 重投影）。
+**依赖**：MCP Server 需 `pip install -e .`（`pyproject.toml`：httpx + pyproj + mcp-types / pydantic）。
 
 
 
@@ -530,9 +530,11 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 
 
 
-- `server/discover` 的 `supportedVersions` 包含 `2026-07-28` 与 `2025-11-25`。
+- 协议类型用 **mcp-types**；传输仍是 `mcp_server.py` 手写 stdio 循环。
 
-- `initialize` **固定协商** `2025-11-25`（见 `mcp_server.negotiate_initialize`）。
+- `server/discover` 的 `supportedVersions` 等于 `list(mcp_types.version.SUPPORTED_PROTOCOL_VERSIONS)`（handshake ∪ modern，含官方表中的旧修订）。
+
+- `initialize` 与 `HANDSHAKE_PROTOCOL_VERSIONS` 求交，空则 `LATEST_HANDSHAKE_VERSION`（`2025-11-25`）。客户端请求 `2026-07-28` **不 echo**。
 
 
 
