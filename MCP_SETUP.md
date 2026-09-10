@@ -88,6 +88,13 @@ Common variables: `AMAP_KEY`, `BAIDU_AK`, `OSM_ENABLED`, `OVERPASS_URL`, `HTTP_T
 
 Often tuned: `AMAP_QPS_LIMIT`, `AMAP_BATCH_SIZE`, `GEOMETRY_FAIL_RATIO`, `RATE_LIMIT_BATCH_RATIO`. Hole-debug (stderr only): `GEO_HOLE_DEBUG`, `GEO_HOLE_DEBUG_RATIO`.
 
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `GEO_INPUT_STRICT` | 关（不设或非 `1`/`true`/`yes`/`on`） | `input_path`/`output_path` 路径白名单。本地单用户通常不必开；多用户/远程部署建议开。 |
+| `GEO_INPUT_ROOT` | 用户主目录 | 仅 `GEO_INPUT_STRICT=true` 时生效：路径必须落在此目录下。 |
+| `GEO_INPUT_MAX_BYTES` | `67108864`（64 MiB） | 输入文件大小上限。 |
+| `PROJECT_KEYWORDS` | `在建\|项目\|工地\|建设` | 高德/百度 around 检索词（`\|` 分隔），整体替换。 |
+
 **Full env table** (defaults and all keys): [references/mcp_evidence_schema.md](references/mcp_evidence_schema.md#相关环境变量). Alert / rate-limit mapping: [references/error_codes.md](references/error_codes.md).
 
 Key signup steps: [references/map_api_setup.md](references/map_api_setup.md).

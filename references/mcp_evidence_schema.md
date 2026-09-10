@@ -393,11 +393,11 @@ OSM 字段解读见 [overpass_query_guide.md](overpass_query_guide.md)。
 
 | `HTTP_TIMEOUT_SECONDS` | HTTP 超时（默认 12） |
 
-| `GEO_INPUT_MAX_BYTES` | 文件输入大小上限（默认 67108864） |
+| `GEO_INPUT_MAX_BYTES` | 文件输入大小上限（默认 **67108864**，约 64 MiB） |
 
-| `GEO_INPUT_STRICT` | 设为 `true` 时启用路径沙箱（须在 `GEO_INPUT_ROOT` 下） |
+| `GEO_INPUT_STRICT` | 路径沙箱，**默认关闭**。设为 `true`/`1`/`yes`/`on` 时 `input_path`/`output_path` 必须落在 `GEO_INPUT_ROOT` 下。本地单用户通常不必开；多用户/远程部署建议开。 |
 
-| `GEO_INPUT_ROOT` | 严格模式根目录（默认用户主目录） |
+| `GEO_INPUT_ROOT` | 严格模式根目录（默认用户主目录）；仅 `GEO_INPUT_STRICT` 开启时生效 |
 
 | `AMAP_QPS_LIMIT` | 高德令牌桶速率（默认 **3**，对齐实测 ≈2.5 QPS） |
 

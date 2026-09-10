@@ -395,7 +395,10 @@ def run_amap_baidu_job_batches(
     query_amap_jobs: list[tuple[int, float, float, float]] | None = None,
     query_baidu_jobs: list[tuple[int, float, float, float]] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
-    """Run jobs in batches with optional inter-batch delay."""
+    """Run jobs in batches with optional inter-batch delay.
+
+    `max_workers` is trusted as already clamped by `effective_max_workers` (1–4).
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     amap_by: dict[int, dict[str, Any]] = {}
@@ -403,7 +406,7 @@ def run_amap_baidu_job_batches(
     split = query_amap_jobs is not None or query_baidu_jobs is not None
     amap_jobs = jobs if query_amap_jobs is None else query_amap_jobs
     baidu_jobs = jobs if query_baidu_jobs is None else query_baidu_jobs
-    workers = min(max(max_workers, 1), 4)
+    workers = max_workers
 
     if not split:
         if not jobs:
