@@ -22,6 +22,9 @@ MCP 返回的结构化错误分两类：**`sources[].reason_code`**（在线 API
 | `CRS_ASSUMED` | warning | 未声明 CRS，假定 WGS84 | **必须**提醒用户确认位置 |
 | `GEOMETRY_INVALID` | warning/error | 部分或全部地物几何无效 | **必须**列出 `invalid_indices`；若有 `invalid_count` / `invalid_reasons` 一并说明；不得当作全量成功 |
 | `GEOMETRY_SIMPLIFIED` | warning | Esri 有损转换（环角色无法判定已拆部件，或 paths→线） | **必须**列出 `feature_indices`；若有 `simplify_reasons` 按 reason 展开；说明面积/形状可能不准确 |
+| `ESRI_PATHS_DROPPED_MIXED_GEOMETRY` | warning | 同几何 rings+paths，已按面处理、丢弃 paths | **必须**列出 `feature_indices`；线路径未参与面积 |
+| `GEOMETRY_SELF_INTERSECTING` | warning | 环自相交，`area_m2` 为空 | **必须**列出 `feature_indices`；计入 `GEOMETRY_FAIL_RATIO`，不叠 `GEOMETRY_INVALID` |
+| `GEOMETRY_AUTO_CLOSED` | warning | 未闭合环已自动补闭合 | **必须**列出 `feature_indices`；面积按闭合后计算；不计 fail-fast |
 
 `invalid_reasons` / `simplify_reasons` 的键为**字符串化的地物 index**（JSON 对象键，如 `"0"`），不是整数。
 
@@ -51,7 +54,9 @@ MCP 返回的结构化错误分两类：**`sources[].reason_code`**（在线 API
 | reason | 含义 |
 |--------|------|
 | `residual_esri_keys` | normalize 后 geometry 仍含 `rings`/`paths` 等 Esri 键（含与 coordinates 并存的混合畸形） |
+| `unsupported_esri_curves` | 含 `curveRings`/`curvePaths`，未解析；请 ArcGIS Densify（密化）后导出 GeoJSON |
 | `geometry_stat_failed` | 质心/面积等几何统计失败（空坐标、无效 Polygon 等） |
+| `degenerate_ring` | 去重后顶点数不足 3，无法成面 |
 
 ### `GEOMETRY_SIMPLIFIED.simplify_reasons`
 

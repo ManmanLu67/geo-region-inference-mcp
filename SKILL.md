@@ -50,8 +50,11 @@ description: >-
 
 **`input_alerts` / `online_summary` 处置**（这些结论必须带进第五步的汇报）：
 - `CRS_ASSUMED` → 提醒用户确认位置（文件未声明坐标系，已假定 WGS84）
-- **`GEOMETRY_INVALID`** → **必须**列出 `invalid_indices`（及 `invalid_reasons` 若存在），说明这些地物结果不完整，**不得**当作全量成功；`invalid_reasons` 含 `residual_esri_keys` 时提示 ArcGIS 导出标准 GeoJSON
+- **`GEOMETRY_INVALID`** → **必须**列出 `invalid_indices`（及 `invalid_reasons` 若存在），说明这些地物结果不完整，**不得**当作全量成功；`invalid_reasons` 含 `residual_esri_keys` 时提示 ArcGIS 导出标准 GeoJSON；含 `unsupported_esri_curves` 时提示先 Densify（密化）；含 `degenerate_ring` 时说明顶点不足
 - **`GEOMETRY_SIMPLIFIED`** → **必须**列出 `feature_indices`；有 `simplify_reasons` 时按 reason 说明（`esri_ring_roles_unresolved` = 环穿插无法嵌套已拆部件；`paths_converted` = 线要素转换），面积/形状可能不准确
+- **`ESRI_PATHS_DROPPED_MIXED_GEOMETRY`** → 列出 `feature_indices`：混合 rings+paths 已按面处理，线路径已丢
+- **`GEOMETRY_SELF_INTERSECTING`** → 列出 `feature_indices`：自相交，`area_m2` 为空，不得当有效面积
+- **`GEOMETRY_AUTO_CLOSED`** → 列出 `feature_indices`：未闭合环已自动补闭合，面积按闭合后计算
 - 抛出「invalid geometry … GEOMETRY_FAIL_RATIO」类 `ValueError`（无效占比默认 ≥0.5）→ **整批失败**，不要当部分成功；拆出有效地物后重跑
 - `all_channels_unavailable=true` → 在线源不可用（缺 Key/网络），**不是**「此地无项目」，结论不得写成无项目
 - `batch_retry_recommended=true` → **必须**建议拆分更小批次重跑，可参考 `batch_retry_reason`

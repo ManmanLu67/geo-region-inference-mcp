@@ -358,6 +358,12 @@ class GeoInputTests(unittest.TestCase):
         self.assertEqual(len(hole_parts), 1)
         self.assertEqual(len(island_parts), 1)
 
+    def test_esri_edge_cross_no_interior_vertex_unresolved(self):
+        path = os.path.join(self.FIXTURES, "esri_rings_edge_cross.json")
+        fc, meta = geo_input.normalize_geo_input(input_path=path)
+        alert = next(a for a in meta["input_alerts"] if a["code"] == "GEOMETRY_SIMPLIFIED")
+        self.assertIn("esri_ring_roles_unresolved", (alert.get("simplify_reasons") or {}).get("0", []))
+
     def test_esri_partial_overlap_unresolved(self):
         path = os.path.join(self.FIXTURES, "esri_rings_partial_overlap.json")
         fc, meta = geo_input.normalize_geo_input(input_path=path)
@@ -832,20 +838,13 @@ class ProtocolTests(unittest.TestCase):
 
 
 class GapFreezeG1G4Tests(unittest.TestCase):
-    """Pin G1–G4 current behavior before changing _resolve_esri_rings (G5). Do not 'fix' these here."""
+    """G1–G4 post-fix contract. Re-run all four after each gap; if G3 reddens G1, stop."""
 
-    def test_g1_rings_plus_paths_drops_paths_silently(self):
-        payload = {
-            "spatialReference": {"wkid": 4326},
-            "features": [{
-                "attributes": {"id": 1},
-                "geometry": {
-                    "rings": [[[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]],
-                    "paths": [[[0, 0], [10, 0]]],
-                },
-            }],
-        }
-        fc, meta = geo_input.normalize_geo_input(geojson=payload)
+    FIXTURES = os.path.join(ROOT, "tests", "fixtures")
+
+    def test_g1_rings_plus_paths_drops_paths_with_alert(self):
+        path = os.path.join(self.FIXTURES, "esri_rings_and_paths.json")
+        fc, meta = geo_input.normalize_geo_input(input_path=path)
         geom = fc["features"][0]["geometry"]
         self.assertEqual(geom["type"], "Polygon")
         self.assertNotIn("paths", geom)
@@ -854,25 +853,46 @@ class GapFreezeG1G4Tests(unittest.TestCase):
         self.assertNotIn("paths_converted", flat)
         codes = [a["code"] for a in meta.get("input_alerts") or []]
         self.assertNotIn("GEOMETRY_INVALID", codes)
+        alert = next(a for a in meta["input_alerts"] if a["code"] == "ESRI_PATHS_DROPPED_MIXED_GEOMETRY")
+        self.assertEqual(alert.get("feature_indices"), [0])
 
-    def test_g2_curve_rings_not_detected_as_esri(self):
+    def test_g2_curve_rings_only_raises_densify(self):
         geom = {"curveRings": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}
-        self.assertFalse(geo_input._geometry_looks_esri(geom))
-        self.assertFalse(geo_input._has_esri_geometry_keys(geom))
-        payload = {
-            "type": "FeatureCollection",
-            "features": [{
-                "type": "Feature",
-                "properties": {},
-                "geometry": geom,
-            }],
-        }
-        fc, meta = geo_input.normalize_geo_input(geojson=payload)
-        self.assertFalse(meta.get("esri_converted"))
-        codes = [a["code"] for a in meta.get("input_alerts") or []]
-        self.assertNotIn("GEOMETRY_SIMPLIFIED", codes)
+        self.assertTrue(geo_input._geometry_looks_esri(geom))
+        self.assertTrue(geo_input._has_esri_geometry_keys(geom))
+        path = os.path.join(self.FIXTURES, "esri_curve_rings_only.json")
+        with self.assertRaises(ValueError) as ctx:
+            geo_input.normalize_geo_input(input_path=path)
+        msg = str(ctx.exception)
+        self.assertTrue("Densify" in msg or "密化" in msg)
 
-    def test_g3_self_intersecting_ring_still_gets_area(self):
+    def test_g2_mixed_keeps_polygon_flags_curve(self):
+        path = os.path.join(self.FIXTURES, "esri_mixed_polygon_and_curve.json")
+        fc, meta = geo_input.normalize_geo_input(input_path=path)
+        self.assertEqual(len(fc["features"]), 3)
+        self.assertEqual(fc["features"][0]["geometry"]["type"], "Polygon")
+        self.assertIn("curveRings", fc["features"][1]["geometry"])
+        reasons = geo_input.scan_residual_esri_geometry(fc["features"])
+        self.assertEqual(reasons.get(1), "unsupported_esri_curves")
+        self.assertNotIn(0, reasons)
+        with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "1.0"}):
+            out = analysis.calculate_geometry(input_path=path)
+        alert = next(a for a in out["input_alerts"] if a["code"] == "GEOMETRY_INVALID")
+        self.assertEqual((alert.get("invalid_reasons") or {}).get("1"), "unsupported_esri_curves")
+        self.assertGreater(out["features"][0].get("area_m2") or 0, 0)
+
+    def test_g2_malformed_curve_kept_no_crash(self):
+        path = os.path.join(self.FIXTURES, "esri_mixed_malformed_curve.json")
+        fc, meta = geo_input.normalize_geo_input(input_path=path)
+        self.assertEqual(len(fc["features"]), 3)
+        with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "1.0"}):
+            out = analysis.calculate_geometry(input_path=path)
+        reasons = (next(a for a in out["input_alerts"] if a["code"] == "GEOMETRY_INVALID").get("invalid_reasons") or {})
+        self.assertIn(reasons.get("1"), ("unsupported_esri_curves", "residual_esri_keys", "geometry_stat_failed"))
+        self.assertIn(reasons.get("2"), ("unsupported_esri_curves", "residual_esri_keys", "geometry_stat_failed"))
+        self.assertGreater(out["features"][0].get("area_m2") or 0, 0)
+
+    def test_g3_self_intersecting_ring_null_area(self):
         feat = {
             "type": "Feature",
             "properties": {},
@@ -881,12 +901,39 @@ class GapFreezeG1G4Tests(unittest.TestCase):
                 "coordinates": [[[0, 0], [1, 1], [0, 1], [1, 0], [0, 0]]],
             },
         }
-        stats = geo_geometry.geometry_stats(feat, 0)
-        self.assertNotIn("error", stats)
-        self.assertIsNotNone(stats.get("area_m2"))
+        fc = {"type": "FeatureCollection", "features": [feat]}
+        with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "2.0"}):
+            out = analysis.calculate_geometry(geojson=fc)
+        stats = out["features"][0]
+        self.assertIsNone(stats.get("area_m2"))
+        codes = [a["code"] for a in out["input_alerts"]]
+        self.assertIn("GEOMETRY_SELF_INTERSECTING", codes)
+        self.assertNotIn("GEOMETRY_INVALID", codes)
 
-    def test_g4_unclosed_three_vertex_ring_still_gets_area(self):
-        feat = {
+    def test_ring_self_intersects_perf_1200(self):
+        import math
+        import time
+        n = 1200
+        ring = [[math.cos(2 * math.pi * i / n), math.sin(2 * math.pi * i / n)] for i in range(n)]
+        ring.append(ring[0])
+        t0 = time.perf_counter()
+        hit = geo_geometry.ring_self_intersects(ring)
+        ms = (time.perf_counter() - t0) * 1000
+        self.assertFalse(hit)
+        if os.environ.get("GEO_PERF"):
+            print(f"\nring_self_intersects n={n} {ms:.1f}ms", flush=True)
+        self.assertLess(ms, 500)
+
+    def test_segments_properly_intersect_collinear_cases(self):
+        spi = geo_geometry.segments_properly_intersect
+        self.assertTrue(spi([0, 0], [2, 0], [1, 0], [3, 0]))
+        self.assertFalse(spi([0, 0], [1, 0], [1, 0], [2, 0]))
+        self.assertFalse(spi([0, 0], [1, 0], [2, 0], [3, 0]))
+        self.assertTrue(spi([0, 0], [1, 1], [0, 1], [1, 0]))
+        self.assertFalse(spi([0, 0], [1, 0], [0, 1], [1, 1]))
+
+    def test_g4_unclosed_three_vertex_ring_auto_closed(self):
+        raw = {
             "type": "Feature",
             "properties": {},
             "geometry": {
@@ -894,11 +941,32 @@ class GapFreezeG1G4Tests(unittest.TestCase):
                 "coordinates": [[[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]],
             },
         }
+        feat = json.loads(json.dumps(raw))
         stats = geo_geometry.geometry_stats(feat, 0)
-        self.assertNotIn("error", stats)
         self.assertGreater(stats.get("area_m2") or 0, 0)
-        alerts = geo_input.build_geometry_invalid_alerts([stats], 1)
-        self.assertFalse(any(a["code"] == "GEOMETRY_INVALID" for a in alerts))
+        self.assertTrue(stats.get("auto_closed"))
+        self.assertEqual(feat["geometry"]["coordinates"][0][0], feat["geometry"]["coordinates"][0][-1])
+        out = analysis.calculate_geometry(geojson={"type": "FeatureCollection", "features": [json.loads(json.dumps(raw))]})
+        codes = [a["code"] for a in out["input_alerts"]]
+        self.assertIn("GEOMETRY_AUTO_CLOSED", codes)
+        self.assertNotIn("GEOMETRY_INVALID", codes)
+
+    def test_g4_two_vertex_ring_degenerate(self):
+        feat = {
+            "type": "Feature",
+            "properties": {},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[0.0, 0.0], [1.0, 0.0]]],
+            },
+        }
+        fc = {"type": "FeatureCollection", "features": [feat]}
+        with mock.patch.dict(os.environ, {"GEOMETRY_FAIL_RATIO": "2.0"}):
+            out = analysis.calculate_geometry(geojson=fc)
+        stats = out["features"][0]
+        self.assertIsNone(stats.get("area_m2"))
+        alert = next(a for a in out["input_alerts"] if a["code"] == "GEOMETRY_INVALID")
+        self.assertEqual((alert.get("invalid_reasons") or {}).get("0"), "degenerate_ring")
 
 
 class MergeAndAdminTests(unittest.TestCase):
@@ -1453,7 +1521,7 @@ class VersionSsotTests(unittest.TestCase):
         from geo_core import version
 
         pyproject = tomllib.loads(Path(ROOT, "pyproject.toml").read_text(encoding="utf-8"))
-        self.assertEqual(version.SERVER_VERSION, "2.7.0")
+        self.assertEqual(version.SERVER_VERSION, "2.8.0")
         self.assertEqual(pyproject["project"]["version"], version.SERVER_VERSION)
         self.assertEqual(mcp_server.SERVER_VERSION, version.SERVER_VERSION)
         self.assertEqual(geo_clients.SERVER_VERSION, version.SERVER_VERSION)

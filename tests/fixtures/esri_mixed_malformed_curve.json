@@ -1,0 +1,28 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": 1 },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "id": 2 },
+      "geometry": {
+        "curveRings": [],
+        "rings": "not-a-list"
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "id": 3 },
+      "geometry": {
+        "curvePaths": "not-a-list"
+      }
+    }
+  ]
+}

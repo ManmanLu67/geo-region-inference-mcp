@@ -26,6 +26,8 @@ from .evidence import (
 from .geometry import feature_list, geometry_stats, radius_from_stats
 from .inputs import (
     build_geometry_invalid_alerts,
+    build_auto_closed_alerts,
+    build_self_intersecting_alerts,
     normalize_geo_input,
     scan_residual_esri_geometry,
     validate_geometry_fail_fast,
@@ -48,6 +50,8 @@ def geometry_pipeline(feats: list[dict[str, Any]], input_alerts: list[dict[str, 
     input_alerts.extend(
         build_geometry_invalid_alerts(stats, len(feats), structure_reasons=structure_reasons)
     )
+    input_alerts.extend(build_self_intersecting_alerts(stats))
+    input_alerts.extend(build_auto_closed_alerts(stats))
     return stats
 
 

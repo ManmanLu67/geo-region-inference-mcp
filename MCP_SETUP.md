@@ -62,7 +62,21 @@ Stdio transport; stays alive until the MCP host closes the connection.
 
 **Handshake:** `initialize` negotiates against `mcp_types.version.HANDSHAKE_PROTOCOL_VERSIONS` (latest `2025-11-25`). A client that requests `2026-07-28` is **not** echoed; the server still answers `2025-11-25`. `server/discover` lists `list(SUPPORTED_PROTOCOL_VERSIONS)` (handshake ∪ modern, including older 2024/2025 revisions from the registry — a wider table than the previous two-element tuple).
 
-Server **2.7.0** is not a protocol-breaking bump (same handshake, same tools). Later G1–G4 geometry fixes should ship as **2.8.0 / 2.9.0**, not a major version.
+### Versioning
+
+**Major** = host-visible **capability break**: tool removed/renamed, required params changed, result keys removed/renamed so old hosts crash, or handshake **stops accepting** a version the host already uses.
+
+**Minor** = same contract, correctness or algorithm fix: official-registry negotiate (no echo of a version we do not speak), `discover` **adding** older revisions, geometry algorithm changes, new **optional** `input_alerts` codes.
+
+**Patch** = docs/tests only; output unchanged.
+
+2.7.0 handshake/discover was a correctness fix (additive `discover`, refuse to echo 2026), not a capability break — no 3.0.0 retrofit. **2.8.0** is geometry-only (G1–G4). Later geometry-only work stays 2.9.x, not a major bump.
+
+`analyze_regions` / `calculate_geometry` may mutate the caller’s GeoJSON dict in place (G4 auto-close). There is no immutability contract.
+
+### `ring_self_intersects` cost (O(n²), segment bbox reject)
+
+Measured 2026-09-10, Windows 11, CPython 3.13.14, Intel Family 6 Model 183: convex n=1200 ring, no self-intersection, **48.7 ms** (threshold 500 ms). Segment bbox reject; no sweep line.
 
 **修改 `mcp_server.py` / `geo_core/**` 后必须重启 MCP 宿主**（stdio 常驻进程不热加载）。重启后，若证据筛选规则（如 `project_evidence`）有变动，已产出但未定稿的结论须重新跑 `analyze_regions`（及后续 gov 检索/校验）再核验，**禁止直接沿用旧结果**。
 

@@ -47,6 +47,105 @@ def polygon_parts(geom: dict[str, Any]) -> list[tuple[list[list[float]], list[li
     return []
 
 
+def _orient(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> float:
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+
+
+def _seg_bbox_disjoint(
+    a: list[float], b: list[float], c: list[float], d: list[float]
+) -> bool:
+    return (
+        max(a[0], b[0]) < min(c[0], d[0])
+        or max(c[0], d[0]) < min(a[0], b[0])
+        or max(a[1], b[1]) < min(c[1], d[1])
+        or max(c[1], d[1]) < min(a[1], b[1])
+    )
+
+
+def _collinear_overlap_length(
+    ax: float, ay: float, bx: float, by: float,
+    cx: float, cy: float, dx: float, dy: float,
+) -> bool:
+    x_lo, x_hi = max(min(ax, bx), min(cx, dx)), min(max(ax, bx), max(cx, dx))
+    y_lo, y_hi = max(min(ay, by), min(cy, dy)), min(max(ay, by), max(cy, dy))
+    if x_hi < x_lo or y_hi < y_lo:
+        return False
+    return (x_hi - x_lo) + (y_hi - y_lo) > 0
+
+
+def segments_properly_intersect(
+    a: list[float], b: list[float], c: list[float], d: list[float]
+) -> bool:
+    """True if AB and CD cross or collinear-overlap with positive length.
+
+    Sharing only an endpoint is not an intersection.
+    """
+    ax, ay = float(a[0]), float(a[1])
+    bx, by = float(b[0]), float(b[1])
+    cx, cy = float(c[0]), float(c[1])
+    dx, dy = float(d[0]), float(d[1])
+    if _seg_bbox_disjoint([ax, ay], [bx, by], [cx, cy], [dx, dy]):
+        return False
+    o1 = _orient(ax, ay, bx, by, cx, cy)
+    o2 = _orient(ax, ay, bx, by, dx, dy)
+    o3 = _orient(cx, cy, dx, dy, ax, ay)
+    o4 = _orient(cx, cy, dx, dy, bx, by)
+    if o1 * o2 < 0 and o3 * o4 < 0:
+        return True
+    if o1 == 0 and o2 == 0 and o3 == 0 and o4 == 0:
+        return _collinear_overlap_length(ax, ay, bx, by, cx, cy, dx, dy)
+    return False
+
+
+def _ring_edge_pts(ring: list) -> list[list[float]]:
+    pts = [[float(p[0]), float(p[1])] for p in ring]
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    return pts
+
+
+def ring_self_intersects(ring: list) -> bool:
+    """True if a non-adjacent pair of edges properly intersects."""
+    pts = _ring_edge_pts(ring)
+    n = len(pts)
+    if n < 4:
+        return False
+    edges = [(pts[i], pts[(i + 1) % n]) for i in range(n)]
+    boxes = [
+        (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+        for a, b in edges
+    ]
+    last = n - 1
+    for i in range(n):
+        bi = boxes[i]
+        a, b = edges[i]
+        j0 = i + 2
+        j1 = last if i == 0 else n
+        for j in range(j0, j1):
+            bj = boxes[j]
+            if bi[2] < bj[0] or bj[2] < bi[0] or bi[3] < bj[1] or bj[3] < bi[1]:
+                continue
+            c, d = edges[j]
+            if segments_properly_intersect(a, b, c, d):
+                return True
+    return False
+
+
+def rings_edges_cross(a: list, b: list) -> bool:
+    """True if any edge of ring a properly intersects any edge of ring b."""
+    pa, pb = _ring_edge_pts(a), _ring_edge_pts(b)
+    na, nb = len(pa), len(pb)
+    if na < 2 or nb < 2:
+        return False
+    for i in range(na):
+        e1, e2 = pa[i], pa[(i + 1) % na]
+        for j in range(nb):
+            f1, f2 = pb[j], pb[(j + 1) % nb]
+            if segments_properly_intersect(e1, e2, f1, f2):
+                return True
+    return False
+
+
 def _local_metric_ring(ring: list[list[float]], *, projected: bool = False):
     """米制坐标 + 平移到局部原点，返回 (局部坐标, 原点, 米制系数)。
 
@@ -169,6 +268,59 @@ def _maybe_log_holes(
     )
 
 
+def _ring_body(ring: list) -> list:
+    if len(ring) > 1 and ring[0] == ring[-1]:
+        return ring[:-1]
+    return list(ring)
+
+
+def _ring_unique_count(ring: list) -> int:
+    return len({(float(p[0]), float(p[1])) for p in _ring_body(ring) if len(p) >= 2})
+
+
+def _ensure_closed_ring(ring: list) -> tuple[list, bool]:
+    if not ring:
+        return ring, False
+    if len(ring) > 1 and ring[0] == ring[-1]:
+        return ring, False
+    return list(ring) + [list(ring[0])], True
+
+
+def _normalize_polygon_rings_inplace(geom: dict[str, Any]) -> tuple[bool, bool]:
+    """Close unclosed rings and flag degenerates.
+
+    Intentionally mutates feature["geometry"] in place. Downstream
+    (geometry_pipeline → POI radius / evidence) reads this same FeatureCollection;
+    there is no "input GeoJSON is immutable" contract.
+    """
+    t = geom.get("type")
+    coords = geom.get("coordinates")
+    if t not in ("Polygon", "MultiPolygon") or not coords:
+        return False, False
+    auto_closed = False
+    degenerate = False
+
+    def fix_poly(poly: list) -> list:
+        nonlocal auto_closed, degenerate
+        out: list = []
+        for ring in poly:
+            if _ring_unique_count(ring) < 3:
+                degenerate = True
+                out.append(ring)
+                continue
+            closed, did = _ensure_closed_ring(ring)
+            if did:
+                auto_closed = True
+            out.append(closed)
+        return out
+
+    if t == "Polygon":
+        geom["coordinates"] = fix_poly(coords)
+    else:
+        geom["coordinates"] = [fix_poly(poly) for poly in coords]
+    return auto_closed, degenerate
+
+
 def compact_properties(props: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     keys = list(props.keys())
     if len(keys) <= 25 and len(json.dumps(props, ensure_ascii=False)) <= 5000:
@@ -201,9 +353,19 @@ def geometry_stats(feature: dict[str, Any], index: int) -> dict[str, Any]:
     short_side = max(min(width, height), 1e-9)
     aspect = long_side / short_side
     area = perim = compact = None
-    parts = polygon_parts(geom)
+    self_intersecting = False
+    auto_closed = False
+    degenerate = False
     t = geom.get("type")
+    if t in ("Polygon", "MultiPolygon"):
+        auto_closed, degenerate = _normalize_polygon_rings_inplace(geom)
+    parts = polygon_parts(geom)
     if parts:
+        if not degenerate and any(
+            ring_self_intersects(outer) or any(ring_self_intersects(h) for h in holes)
+            for outer, holes in parts
+        ):
+            self_intersecting = True
         area_sum = perim_sum = 0.0
         outer_area = 0.0
         hole_perim = 0.0
@@ -229,14 +391,20 @@ def geometry_stats(feature: dict[str, Any], index: int) -> dict[str, Any]:
                 num_lat -= lat_h * a_h
                 weights -= a_h
         area_sum = max(area_sum, 0.0)
-        area, perim = round(area_sum, 1), round(perim_sum, 1)
-        if perim_sum > 0 and area_sum > 0:
-            compact = round((4 * math.pi * area_sum) / (perim_sum**2), 3)
+        if self_intersecting or degenerate:
+            area = None
+            compact = None
+            perim = round(perim_sum, 1) if not degenerate else None
+        else:
+            area, perim = round(area_sum, 1), round(perim_sum, 1)
+            if perim_sum > 0 and area_sum > 0:
+                compact = round((4 * math.pi * area_sum) / (perim_sum**2), 3)
         if weights > 0:
             cx, cy = num_lon / weights, num_lat / weights
         elif fallback_cx is not None:
             cx, cy = fallback_cx, fallback_cy
-        _maybe_log_holes(index, area_sum, outer_area, hole_count, hole_perim)
+        if not self_intersecting and not degenerate:
+            _maybe_log_holes(index, area_sum, outer_area, hole_count, hole_perim)
     elif t in ("LineString", "MultiLineString", "MultiPoint"):
         uniq = pts[:-1] if len(pts) > 1 and pts[0] == pts[-1] else pts
         cx = sum(float(p[0]) for p in uniq) / len(uniq)
@@ -256,6 +424,12 @@ def geometry_stats(feature: dict[str, Any], index: int) -> dict[str, Any]:
         "properties": compact_props,
         "property_keys": property_keys,
     }
+    if self_intersecting:
+        result["self_intersecting"] = True
+    if auto_closed:
+        result["auto_closed"] = True
+    if degenerate:
+        result["invalid_reason"] = "degenerate_ring"
     return result
 
 

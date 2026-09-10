@@ -20,7 +20,7 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 
   "server": "geo-region-inference",
 
-  "server_version": "2.7.0",  // 示例值；实际以 geo_core/version.py 为准
+  "server_version": "2.8.0",  // 示例值；实际以 geo_core/version.py 为准
 
   "feature_count": 2,
 
@@ -106,9 +106,12 @@ LLM **最终**输出格式见 [output_schema.md](output_schema.md)。不要把 M
 
   - `CRS_ASSUMED`：未声明 CRS，已假定 WGS84
 
-  - `GEOMETRY_INVALID`：部分/全部地物几何无效；**必须**列出 `invalid_indices`；可选 `invalid_count`、`invalid_reasons`（`residual_esri_keys` / `geometry_stat_failed`）
+  - `GEOMETRY_INVALID`：部分/全部地物几何无效；**必须**列出 `invalid_indices`；可选 `invalid_count`、`invalid_reasons`（`residual_esri_keys` / `unsupported_esri_curves` / `degenerate_ring` / `geometry_stat_failed`）
 
   - `GEOMETRY_SIMPLIFIED`：Esri 有损转换；**必须**列出 `feature_indices`；可选 `simplify_reasons`（`esri_ring_roles_unresolved` = 环穿插无法嵌套 / `paths_converted`）
+  - `ESRI_PATHS_DROPPED_MIXED_GEOMETRY`：rings+paths 混合，已丢 paths
+  - `GEOMETRY_SELF_INTERSECTING`：自相交，`area_m2` 为空
+  - `GEOMETRY_AUTO_CLOSED`：未闭合环已自动补闭合
 
   - 完整表见 [error_codes.md](error_codes.md)
 

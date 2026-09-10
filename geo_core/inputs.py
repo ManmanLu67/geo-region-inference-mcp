@@ -9,18 +9,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .geometry import rings_edges_cross
+
 GEOJSON_TYPES = frozenset(
     {"FeatureCollection", "Feature", "Point", "MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon", "GeometryCollection"}
 )
 ESRI_EXPORT_HINT = (
     "检测到 ArcGIS Esri JSON 格式且无法自动转换为 GeoJSON。请在 ArcGIS 中选择「导出为 GeoJSON」并指定坐标系，"
     "然后使用 analyze_regions(input_path=导出的.geojson)。"
+    "若含 curveRings/curvePaths，请先 Densify（密化）再导出。"
 )
 CRS_ASSUMED_MESSAGE = (
     "文件未声明坐标系，已假定 WGS84 (EPSG:4326)；若位置明显不对请重新导出并指定坐标系。"
 )
 GEOMETRY_SIMPLIFIED_MESSAGE = (
     "部分地物 Esri 几何经简化转换（如仅保留外环），面积/形状可能不准确；建议 ArcGIS 导出标准 GeoJSON。"
+)
+ESRI_PATHS_DROPPED_MESSAGE = (
+    "部分地物同时含 Esri rings 与 paths：已按面（rings）处理，线路径（paths）已丢弃。"
+)
+GEOMETRY_SELF_INTERSECTING_MESSAGE = (
+    "部分地物环自相交，面积无法可靠计算（area_m2 为空）；请修正几何后重跑。"
+)
+GEOMETRY_AUTO_CLOSED_MESSAGE = (
+    "部分地物环未闭合，已自动补上首尾顶点；面积按闭合后计算。"
 )
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 TARGET_EPSG = 4326
@@ -40,6 +52,7 @@ class EsriConvertMeta:
     converted: bool = False
     simplified_indices: list[int] = field(default_factory=list)
     simplified_reasons: dict[int, list[str]] = field(default_factory=dict)
+    dropped_paths_indices: list[int] = field(default_factory=list)
 
 
 def geometry_fail_ratio() -> float:
@@ -132,10 +145,16 @@ def _has_valid_geojson_coordinates(geom: dict[str, Any]) -> bool:
     return len(flat) > 0
 
 
+def _has_curve_keys(geom: dict[str, Any] | None) -> bool:
+    return isinstance(geom, dict) and ("curveRings" in geom or "curvePaths" in geom)
+
+
 def _has_esri_geometry_keys(geom: dict[str, Any] | None) -> bool:
     if not isinstance(geom, dict):
         return False
     if "rings" in geom or "paths" in geom:
+        return True
+    if _has_curve_keys(geom):
         return True
     if "x" in geom and "y" in geom:
         return True
@@ -254,6 +273,8 @@ def _rings_cross(a: list, b: list) -> bool:
     disjoint = ab[2] < bb[0] or bb[2] < ab[0] or ab[3] < bb[1] or bb[3] < ab[1]
     if disjoint:
         return False
+    if rings_edges_cross(a, b):
+        return True
     for p in _ring_vertices(a):
         if _point_in_ring(float(p[0]), float(p[1]), b):
             return True
@@ -314,8 +335,8 @@ def _convert_esri_geometry(geom: dict[str, Any]) -> tuple[dict[str, Any] | None,
         return geom, []
     simplifications: list[str] = []
     if "rings" in geom:
-        rings = geom.get("rings") or []
-        if not rings:
+        rings = geom.get("rings")
+        if not isinstance(rings, list) or not rings:
             return None, []
         parts, unresolved = _resolve_esri_rings(rings)
         if not parts:
@@ -330,8 +351,8 @@ def _convert_esri_geometry(geom: dict[str, Any]) -> tuple[dict[str, Any] | None,
             "coordinates": [[outer, *holes] for outer, holes in parts],
         }, simplifications
     if "paths" in geom:
-        paths = geom.get("paths") or []
-        if not paths:
+        paths = geom.get("paths")
+        if not isinstance(paths, list) or not paths:
             return None, []
         simplifications.append("paths_converted")
         if len(paths) == 1:
@@ -340,6 +361,13 @@ def _convert_esri_geometry(geom: dict[str, Any]) -> tuple[dict[str, Any] | None,
     if "x" in geom and "y" in geom:
         return {"type": "Point", "coordinates": [float(geom["x"]), float(geom["y"])]}, simplifications
     return None, []
+
+
+def _esri_mixed_paths_dropped(geom: dict[str, Any]) -> bool:
+    if "rings" not in geom:
+        return False
+    paths = geom.get("paths")
+    return isinstance(paths, list) and len(paths) > 0
 
 
 def _feature_properties(feat: dict[str, Any]) -> dict[str, Any]:
@@ -374,6 +402,8 @@ def try_convert_esri_to_geojson(payload: dict[str, Any]) -> tuple[dict[str, Any]
         if simplifications:
             meta.simplified_indices.append(0)
             meta.simplified_reasons.setdefault(0, []).extend(simplifications)
+        if _esri_mixed_paths_dropped(payload):
+            meta.dropped_paths_indices.append(0)
         meta.converted = True
         return {
             "type": "FeatureCollection",
@@ -390,6 +420,7 @@ def try_convert_esri_to_geojson(payload: dict[str, Any]) -> tuple[dict[str, Any]
         return None, meta
 
     converted_features: list[dict[str, Any]] = []
+    actually_converted = False
     for idx, feat in enumerate(feats):
         if not isinstance(feat, dict):
             continue
@@ -398,17 +429,26 @@ def try_convert_esri_to_geojson(payload: dict[str, Any]) -> tuple[dict[str, Any]
             continue
         geom, simplifications = _convert_esri_geometry(geom_raw)
         if geom is None:
+            if _has_curve_keys(geom_raw):
+                converted_features.append({
+                    "type": "Feature",
+                    "properties": _feature_properties(feat),
+                    "geometry": geom_raw,
+                })
             continue
+        actually_converted = True
         if simplifications:
             meta.simplified_indices.append(idx)
             meta.simplified_reasons.setdefault(idx, []).extend(simplifications)
+        if _esri_mixed_paths_dropped(geom_raw):
+            meta.dropped_paths_indices.append(idx)
         converted_features.append({
             "type": "Feature",
             "properties": _feature_properties(feat),
             "geometry": geom,
         })
 
-    if not converted_features:
+    if not converted_features or not actually_converted:
         return None, meta
 
     meta.converted = True
@@ -591,6 +631,13 @@ def build_input_alerts(crs_meta: dict[str, Any], *, esri_meta: EsriConvertMeta |
                 str(k): v for k, v in sorted(esri_meta.simplified_reasons.items())
             }
         alerts.append(alert)
+    if esri_meta and esri_meta.dropped_paths_indices:
+        alerts.append({
+            "code": "ESRI_PATHS_DROPPED_MIXED_GEOMETRY",
+            "severity": "warning",
+            "feature_indices": list(esri_meta.dropped_paths_indices),
+            "user_message": ESRI_PATHS_DROPPED_MESSAGE,
+        })
     return alerts
 
 
@@ -608,8 +655,10 @@ def scan_residual_esri_geometry(features: list[dict[str, Any]]) -> dict[int, str
     for idx, feat in enumerate(features):
         if not isinstance(feat, dict):
             continue
-        geom = feat.get("geometry")
-        if _geometry_has_residual_esri_keys(geom if isinstance(geom, dict) else None):
+        geom = feat.get("geometry") if isinstance(feat.get("geometry"), dict) else None
+        if _has_curve_keys(geom) and not _has_valid_geojson_coordinates(geom or {}):
+            out[idx] = "unsupported_esri_curves"
+        elif _geometry_has_residual_esri_keys(geom):
             out[idx] = "residual_esri_keys"
     return out
 
@@ -617,10 +666,14 @@ def scan_residual_esri_geometry(features: list[dict[str, Any]]) -> dict[int, str
 def merged_invalid_indices(
     stats: list[dict[str, Any]],
     structure_reasons: dict[int, str] | None = None,
+    *,
+    include_self_intersecting: bool = True,
 ) -> list[int]:
     reasons = structure_reasons or {}
     indices: set[int] = set(reasons.keys())
     for s in stats:
+        if not include_self_intersecting and s.get("self_intersecting"):
+            continue
         if is_geometry_stat_invalid(s):
             indices.add(s["index"])
     return sorted(indices)
@@ -633,8 +686,10 @@ def merged_invalid_reasons(
     reasons: dict[int, str] = dict(structure_reasons or {})
     for s in stats:
         idx = s["index"]
+        if s.get("self_intersecting"):
+            continue
         if is_geometry_stat_invalid(s) and idx not in reasons:
-            reasons[idx] = "geometry_stat_failed"
+            reasons[idx] = s.get("invalid_reason") or "geometry_stat_failed"
     return reasons
 
 
@@ -655,6 +710,7 @@ def _geometry_invalid_user_message(
     invalid_reasons: dict[int, str],
 ) -> str:
     esri_indices = sorted(i for i, r in invalid_reasons.items() if r == "residual_esri_keys")
+    curve_indices = sorted(i for i, r in invalid_reasons.items() if r == "unsupported_esri_curves")
     base = (
         f"{invalid_count}/{feature_count} 个地物几何无效或无法计算面积/质心，"
         "这些地物结果不完整；请检查 GeoJSON/Esri 格式。"
@@ -662,6 +718,9 @@ def _geometry_invalid_user_message(
     if esri_indices:
         idx_text = "、".join(str(i) for i in esri_indices)
         base += f" 地物 {idx_text} 含未转换的 Esri 几何键(rings/paths)；建议 ArcGIS 导出标准 GeoJSON。"
+    if curve_indices:
+        idx_text = "、".join(str(i) for i in curve_indices)
+        base += f" 地物 {idx_text} 含 Esri 曲线(curveRings/curvePaths)，无法解析；请先 Densify（密化）再导出 GeoJSON。"
     return base
 
 
@@ -671,7 +730,9 @@ def build_geometry_invalid_alerts(
     *,
     structure_reasons: dict[int, str] | None = None,
 ) -> list[dict[str, Any]]:
-    invalid_indices = merged_invalid_indices(stats, structure_reasons)
+    invalid_indices = merged_invalid_indices(
+        stats, structure_reasons, include_self_intersecting=False
+    )
     if not invalid_indices:
         return []
     invalid_reasons = merged_invalid_reasons(stats, structure_reasons)
@@ -687,6 +748,30 @@ def build_geometry_invalid_alerts(
     if invalid_reasons:
         alert["invalid_reasons"] = {str(k): v for k, v in sorted(invalid_reasons.items())}
     return [alert]
+
+
+def build_self_intersecting_alerts(stats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    indices = sorted(s["index"] for s in stats if s.get("self_intersecting"))
+    if not indices:
+        return []
+    return [{
+        "code": "GEOMETRY_SELF_INTERSECTING",
+        "severity": "warning",
+        "feature_indices": indices,
+        "user_message": GEOMETRY_SELF_INTERSECTING_MESSAGE,
+    }]
+
+
+def build_auto_closed_alerts(stats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    indices = sorted(s["index"] for s in stats if s.get("auto_closed") and not s.get("self_intersecting"))
+    if not indices:
+        return []
+    return [{
+        "code": "GEOMETRY_AUTO_CLOSED",
+        "severity": "warning",
+        "feature_indices": indices,
+        "user_message": GEOMETRY_AUTO_CLOSED_MESSAGE,
+    }]
 
 
 def validate_geometry_fail_fast(
@@ -737,6 +822,7 @@ def load_geo_input(*, geojson: dict[str, Any] | None = None, input_path: str | N
     load_meta["esri_simplified_reasons"] = {
         str(k): list(v) for k, v in esri_meta.simplified_reasons.items()
     }
+    load_meta["esri_dropped_paths_indices"] = list(esri_meta.dropped_paths_indices)
     return payload, load_meta
 
 
@@ -750,6 +836,7 @@ def normalize_geo_input(*, geojson: dict[str, Any] | None = None, input_path: st
         converted=bool(load_meta.get("esri_converted")),
         simplified_indices=list(load_meta.get("esri_simplified_indices") or []),
         simplified_reasons=simplified_reasons,
+        dropped_paths_indices=[int(i) for i in (load_meta.get("esri_dropped_paths_indices") or [])],
     )
     fc = to_feature_collection(payload)
     crs_info = extract_crs_info(payload, fc)
