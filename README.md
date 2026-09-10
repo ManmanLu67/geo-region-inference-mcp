@@ -46,7 +46,8 @@ geo-region-inference/
 │   ├── __init__.py                  # 门面 re-export
 │   ├── analysis.py                  # analyze_regions / calculate_geometry 编排
 │   ├── evidence.py                  # 项目证据抽取与摘要
-│   ├── inputs.py                    # GeoJSON 加载、CRS、Esri 误传检测
+│   ├── inputs.py                    # GeoJSON 加载、CRS、Esri 识别/转换
+│   ├── esri_rings.py                # Esri 环包含关系 / even-odd 嵌套
 │   ├── geometry.py                  # 权威几何统计
 │   ├── clients.py                   # httpx / 高德 / 百度 / OSM
 │   ├── gov_search.py                # 政府 Web 四轮 query 计划（无 HTTP）

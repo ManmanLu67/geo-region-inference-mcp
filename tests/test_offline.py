@@ -18,6 +18,7 @@ from geo_core import clients as geo_clients  # noqa: E402
 from geo_core import evidence  # noqa: E402
 from geo_core import geometry as geo_geometry  # noqa: E402
 from geo_core import inputs as geo_input  # noqa: E402
+from geo_core import esri_rings as geo_esri_rings  # noqa: E402
 import mcp_server  # noqa: E402
 from geo_core.clients import (  # noqa: E402
     DISABLED,
@@ -391,9 +392,9 @@ class GeoInputTests(unittest.TestCase):
         nested = [[3, 3], [7, 3], [7, 7], [3, 7], [3, 3]]
         shared_vertex = [[0, 0], [3, 1], [1, 3], [0, 0]]
         adjacent = [[10, 0], [14, 0], [14, 4], [10, 4], [10, 0]]
-        self.assertTrue(geo_input._ring_inside(nested, outer))
-        self.assertTrue(geo_input._ring_inside(shared_vertex, outer))
-        self.assertFalse(geo_input._ring_inside(adjacent, outer))
+        self.assertTrue(geo_esri_rings._ring_inside(nested, outer))
+        self.assertTrue(geo_esri_rings._ring_inside(shared_vertex, outer))
+        self.assertFalse(geo_esri_rings._ring_inside(adjacent, outer))
 
     def test_esri_paths_converted_keeps_generic_message(self):
         path = os.path.join(self.FIXTURES, "esri_paths_false_negative.json")
